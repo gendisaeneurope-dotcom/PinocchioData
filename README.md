@@ -1,4 +1,4 @@
-# Example code with Pinocchio, with Gepetto viewer 
+# Example code with Pinocchio, with Gepetto viewer (Gendis' ver is with MeshCat)
 
 ## 🧠 Overview
 
@@ -124,3 +124,11 @@ The motion is replayed in real time:
 - A red sphere tracks the Center of Mass (CoM)
 - A floor plane is added for spatial reference
 - Playback speed is synchronized to 60 FPS.
+
+############################################################################################################################################
+#### 7. Additional information in the version of 
+
+This is my addition to Oceane's original code of "./run_expe_data.py" --> ./run_expe_data_1.py
+I have added components, such as 
+total mass, compute CoM at neutral pose, verify joint limits, check gravity vector, compute Jacobians
+Compute M(q) with crba, h(q,q̇) with rnea, implement equation of motion, add external force at the last joint (not yet CoM)
