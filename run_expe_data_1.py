@@ -49,25 +49,36 @@ model, collision_model, visual_model = pin.buildModelsFromUrdf(
     urdf_model_path, mesh_dir)
 data = model.createData()
 
-# Basic model info
-q0 = pin.neutral(model)
-v0 = np.zeros(model.nv)
-a0 = np.zeros(model.nv)
+# Total mass
+total_mass = sum([model.inertias[i].mass for i in range(model.njoints)])
 
-# CoM
+# CoM at neutral pose
+q0 = pin.neutral(model)
 com0 = pin.centerOfMass(model, data, q0)
+
+# Joint limits
+for i in range(1, model.njoints):
+    name = model.names[i]
+    lower = model.lowerPositionLimit[i-1]
+    upper = model.upperPositionLimit[i-1]
+    print(f"Joint {name}: [{lower:.3f}, {upper:.3f}] rad")
+
+# Gravity vector
+print(model.gravity.linear)
 
 # Jacobian of last joint
 pin.computeJointJacobians(model, data, q0)
 J = pin.getJointJacobian(model, data, model.njoints-1, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
 
-# Mass matrix
+# M(q) — mass matrix
 M = pin.crba(model, data, q0)
 
-# Inverse Dynamics h(q, qdot)
+# h(q, qdot) — gravity and Coriolis at zero velocity
+v0 = np.zeros(model.nv)
+a0 = np.zeros(model.nv)
 h = pin.rnea(model, data, q0, v0, a0)
 
-# Equation of motion torque
+# Equation of motion: tau = M(q)*a + h(q,qdot)
 tau_eom = M @ a0 + h
 
 # External force at last joint (Fz = 10N)
@@ -77,24 +88,39 @@ for i in range(model.njoints):
 fext[model.njoints - 1] = pin.Force(np.array([0, 0, 10, 0, 0, 0]))
 tau_with_fext = pin.rnea(model, data, q0, v0, a0, fext)
 
+
 # Save all results to file
 with open("model_info.txt", "w") as f:
-    f.write(f"model.nq: {model.nq}\n")
-    f.write(f"model.nv: {model.nv}\n")
-    f.write(f"Joint names: {[model.names[i] for i in range(model.njoints)]}\n")
+    # Total mass
     f.write(f"Total mass: {sum([model.inertias[i].mass for i in range(model.njoints)])}\n")
-    f.write(f"Gravity: {model.gravity.linear}\n")
+
+    # CoM at neutral pose
+    f.write(f"CoM at neutral: {com0}\n")
+
+    # Joint limits
     f.write("Joint limits:\n")
     for i in range(1, model.njoints):
         name = model.names[i]
         lower = model.lowerPositionLimit[i-1]
         upper = model.upperPositionLimit[i-1]
         f.write(f"  Joint {name}: [{lower:.3f}, {upper:.3f}] rad\n")
-    f.write(f"CoM at neutral: {com0}\n")
+
+    # Gravity vector
+    f.write(f"Gravity: {model.gravity.linear}\n")
+
+    # Jacobian of last joint
     f.write(f"Jacobian of last joint:\n{J}\n")
+
+    # M(q)
     f.write(f"Mass matrix M(q):\n{M}\n")
+
+    # h(q, qdot)
     f.write(f"h(q, qdot): {h}\n")
+
+    # Equation of motion
     f.write(f"tau_eom: {tau_eom}\n")
+
+    # External force at last joint
     f.write(f"tau_with_fext: {tau_with_fext}\n")
 
 # =====================================================
