@@ -49,11 +49,14 @@ model, collision_model, visual_model = pin.buildModelsFromUrdf(
     urdf_model_path, mesh_dir)
 data = model.createData()
 
+q0 = pin.neutral(model)
+v0 = np.zeros(model.nv)
+a0 = np.zeros(model.nv)
+
 # Total mass
 total_mass = sum([model.inertias[i].mass for i in range(model.njoints)])
 
 # CoM at neutral pose
-q0 = pin.neutral(model)
 com0 = pin.centerOfMass(model, data, q0)
 
 # Joint limits
@@ -74,18 +77,23 @@ J = pin.getJointJacobian(model, data, model.njoints-1, pin.ReferenceFrame.LOCAL_
 M = pin.crba(model, data, q0)
 
 # h(q, qdot) — gravity and Coriolis at zero velocity
-v0 = np.zeros(model.nv)
-a0 = np.zeros(model.nv)
+
 h = pin.rnea(model, data, q0, v0, a0)
 
 # Equation of motion: tau = M(q)*a + h(q,qdot)
 tau_eom = M @ a0 + h
 
 # External force at last joint (Fz = 10N)
-fext = pin.StdVec_Force()
-for i in range(model.njoints):
-    fext.append(pin.Force.Zero())
-fext[model.njoints - 1] = pin.Force(np.array([0, 0, 10, 0, 0, 0]))
+pin.forwardKinematics(model, data, q0)       
+fext = [pin.Force.Zero() for _ in range(model.njoints)]  
+
+joint_id = model.njoints - 1                    # last joint for now
+
+F_local = np.array([0.0, 0.0, 10.0])           # N in Z, joint local frame
+M_local = np.array([0.0, 0.0, 0.0])            # Nm
+
+fext[joint_id] = pin.Force(F_local, M_local)
+
 tau_with_fext = pin.rnea(model, data, q0, v0, a0, fext)
 
 
