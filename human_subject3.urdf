@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--Thus URDF was modified from `double_pendulum.urdf to avoid mehses.
+    Modifications by Justin Beri (https://github.com/justinberi) -->
+<robot
+  name="Human">
+  <link
+    name="foot_base">
+     <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1.0005"/>
+      <inertia ixx="0.0015555025017706355" ixy="0.001" ixz="0.001"
+               iyy="0.0015555025017706355" iyz="0.001" 
+               izz="0.002334273081666271" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"  rpy="0 0 0" />
+      <geometry>
+        <box size="0.3 0.5 0.06825"/>
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 0 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.3 0.3 0.06825"/>
+      </geometry>
+    </collision>
+  </link>
+
+   <!-- Ankle flexion axis = anatomical y → align to parent x with +90° around z -->
+  <joint name="ankle_flex" type="fixed">
+    <parent link="foot_base"/>
+    <child link="foot_lower"/>
+    <axis xyz="1 0 0"/>
+    <origin xyz="0 0 0.05" rpy="0 0 1.57"/>
+    <limit lower="-1.0" upper="1.0" effort="200" velocity="5"/>
+  </joint>
+
+  <link name="foot_lower">
+    <inertial>
+      <origin xyz="0 0 0.0" rpy="0 0 0"/>
+      <mass value="0.006900000000000001"/>
+      <inertia ixx="2.1649637153961108e-05" ixy="0" ixz="0"
+               iyy="2.1649637153961108e-05" iyz="0"
+               izz="4.329923908917222e-05"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.12 0.06 0.000175"/>
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 0 0 1" />
+      </material>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+     <geometry>
+        <box size="0.12 0.06 0.000175"/>
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="1 0 0 1" />
+      </material>
+    </collision>
+  </link>
+  <!-- ===============================
+       LEGS
+       =============================== -->
+
+  <link  name="legs">
+    <inertial>
+      <origin  xyz="0 0 0.5" rpy="0 0 0" />
+
+      <mass value="11.109" />
+      <inertia
+        ixx="0.6949203268232795" ixy="0.001"  ixz="0.001" 
+        iyy="0.6949203268232795" iyz="0.001"
+        izz="0.022858647177809225" />
+    </inertial>
+    <visual>
+      <origin   xyz="0 0 0.5" rpy="0 0 0" />
+      <geometry>
+        <box size="0.12 0.12 0.85925"/>
+      </geometry>
+      <material
+        name="">
+        <color rgba="0 1 0 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0.5" rpy="0 0 0" />
+      <geometry>
+        <box size="0.12 0.12 0.85925"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint
+    name="ankle_eversion"
+    type="revolute">
+    
+    <origin xyz="0 0 0.05" rpy="0 0 1.57"/>
+    <parent
+      link="foot_lower" />
+    <child
+      link="legs" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="0"   upper="0"
+      effort="0"  velocity="0" />
+    <dynamics
+      damping="0.05" />
+  </joint>
+
+
+  <!-- ===============================
+       PELVIS
+       =============================== -->
+
+  <link
+    name="pelvis">
+    <inertial>
+      <origin
+        xyz="-0.1 0 0.1"   rpy="0 0 0" />
+      <mass
+        value="9.797999999999998" />
+      <inertia
+        ixx="0.10207311544725757"  ixy="0" ixz="0"    
+        iyy="0.10207311544725757"  iyz="0"
+        izz="0.19401907933201518" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="-0.1 0 0.1" rpy="0 0 0" />
+      <geometry>
+        <box size="0.20 0.40 0.07875"/>
+      </geometry>
+      <material
+        name="">
+        <color rgba="0 0 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.1 0 0.1" rpy="0 0 0" />
+      <geometry>
+        <box size="0.20 0.40 0.07875"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="hip_abduction"
+    type="revolute">
+     <axis xyz="1 0 0"/>
+    <origin
+      xyz="0 0 1"
+      rpy="0 0 0" />
+    <parent
+      link="legs" />
+    <child
+      link="pelvis" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="0"  upper="0"
+      effort="0" velocity="0" />
+    <dynamics
+      damping="0.05" />
+  </joint>
+
+  <!-- ===============================
+       TORSO
+       =============================== -->
+
+  <link
+    name="torso">
+    <inertial>
+      <origin
+        xyz="0 -0.1 0.4"   rpy="0 0 0" />
+      <mass
+        value="46.782000000000004" />
+      <inertia
+        ixx="2.903287575448008"  ixy="0" ixz="0"    
+        iyy="2.903287575448008"  iyz="0"
+        izz="0.4190308930835168" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 -0.1 0.4" rpy="0 0 0" />
+      <geometry>
+        <box size="0.40 0.20 0.8312499999999999"/>
+      </geometry>
+      <material
+        name="">
+        <color rgba="0 0 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.1 0.4" rpy="0 0 0" />
+      <geometry>
+        <box size="0.40 0.20 0.8312499999999999"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint
+    name="hip_flexion"
+    type="fixed">
+     <axis xyz="1 0 0"/>
+    <origin
+      xyz=" 0 0 0 "
+      rpy="0 0 -1.57" />
+    <parent
+      link="pelvis" />
+    <child
+      link="torso" />
+    <axis
+      xyz="1 0 0" />
+    <limit
+      lower="0"  upper="0"
+      effort="0" velocity="0" />
+    <dynamics
+      damping="0.05" />
+  </joint>
+
+</robot>

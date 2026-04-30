@@ -1,0 +1,22 @@
+model.nq: 2
+model.nv: 2
+Joint names: ['universe', 'ankle_eversion', 'hip_abduction']
+Total mass: 68.6964
+Gravity: [ 0.    0.   -9.81]
+Joint limits:
+  Joint ankle_eversion: [0.000, 0.000] rad
+  Joint hip_abduction: [0.000, 0.000] rad
+CoM at neutral: [ 8.35881351e-02 -7.80903388e-05  1.30886850e+00]
+Jacobian of last joint:
+[[ 0.00159265  0.        ]
+ [ 0.99999873  0.        ]
+ [ 0.          0.        ]
+ [-0.99999873 -0.99999873]
+ [ 0.00159265  0.00159265]
+ [ 0.          0.        ]]
+Mass matrix M(q):
+[[110.02583131  30.28106099]
+ [ 30.28106099  10.58846099]]
+h(q, qdot): [-0.03654593 -0.03654593]
+tau_eom: [-0.03654593 -0.03654593]
+tau_with_fext: [-0.03654593 -0.03654593]
