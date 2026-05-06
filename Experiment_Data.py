@@ -92,19 +92,37 @@ h = pin.rnea(model, data, q0, v0, a0)
 # Equation of motion: tau = M(q)*a + h(q,qdot)
 tau_eom = M @ a0 + h
 
-# External force at last joint (Fz = 10N)
-pin.forwardKinematics(model, data, q0)       
-fext = [pin.Force.Zero() for _ in range(model.njoints)]  
+# ===========================================================================================
+# External force to CoM
 
-joint_id = model.njoints - 1                    # last joint for now
+# 1. Get parent joint of CoM
+parent_id  = model.getJointId("hip_c_rotation1")
 
-F_local = np.array([0.0, 0.0, 10.0])           # N in Z, joint local frame
-M_local = np.array([0.0, 0.0, 0.0])            # Nm
+# 2. Forward kinematics
+pin.forwardKinematics(model, data, q0)
 
-fext[joint_id] = pin.Force(F_local, M_local)
+# 3. Where is the CoM and the joint in world space?
+com_pos    = pin.centerOfMass(model, data, q0)
+parent_pos = data.oMi[parent_id].translation
 
+# 4. Lever arm from joint → CoM
+r = com_pos - parent_pos
+
+# 5. Force at CoM (world frame)
+F = np.array([0.0, 0.0, 10.0])
+
+# 6. Moment it creates at the parent joint
+M = np.cross(r, F)
+
+# 7. Rotate into joint local frame
+R = data.oMi[parent_id].rotation
+F_local = R.T @ F
+M_local = R.T @ M
+
+# 8. Apply and run RNEA
+fext = [pin.Force.Zero() for _ in range(model.njoints)]
+fext[parent_id] = pin.Force(F_local, M_local)
 tau_with_fext = pin.rnea(model, data, q0, v0, a0, fext)
-
 
 # Save all results to file
 with open("model_info.txt", "w") as f:
@@ -137,7 +155,7 @@ with open("model_info.txt", "w") as f:
     # Equation of motion
     f.write(f"tau_eom: {tau_eom}\n")
 
-    # External force at last joint
+    # External force at CoM
     f.write(f"tau_with_fext: {tau_with_fext}\n")
 
 # =====================================================
@@ -156,61 +174,95 @@ if joint_model:
 else:
     print("No joint angle columns found to convert to radians.")
 
-df['time'] = df['marker_timestamp'] - df.head(1)['marker_timestamp'].values[0]  
+print("after deg2rad:", df[joint_model[0]].head(5).tolist())   # ← check 1
 
+# ── Drop NaN rows before anything else 
+df = df.dropna(subset=joint_model).reset_index(drop=True)
+df['time'] = df['marker_timestamp'] - df['marker_timestamp'].iloc[0]
+
+print(f"Rows after dropna: {len(df)}")
+
+# ── Build df_filtered 
 df_filtered = pd.DataFrame()
-df_filtered['time'] = df['time']
-for col in joint_model:
-    df_filtered[col] = df[col]
+df_filtered['time'] = df['time'].values
 
-cutoff_freq = 3
-nyquist_freq = 1 / (2 * df['time'].diff().mean())
+for col in joint_model:
+    df_filtered[col] = df[col].values
+
+print("after copy:", df_filtered[joint_model[0]].head(5).tolist())   # ← check 2
+
+# ── Filter coefficients 
+cutoff_freq       = 3
+nyquist_freq      = 1 / (2 * df['time'].diff().mean())
 normalized_cutoff = cutoff_freq / nyquist_freq
 b, a = butter(4, normalized_cutoff, btype='low')
 
+# ── Pass 1: filter 
 for col in joint_model:
     df_filtered[col] = filtfilt(b, a, df_filtered[col].astype(float))
+
+# ── Pass 2: derivatives 
+for col in joint_model:
     df_filtered['vel_' + col] = df_filtered[col].diff() / df_filtered['time'].diff()
     df_filtered['acc_' + col] = df_filtered['vel_' + col].diff() / df_filtered['time'].diff()
     df_filtered['tau_' + col] = 0.0
-    df_filtered[col] = df_filtered[col].fillna(0)
+    df_filtered[col]          = df_filtered[col].fillna(0)
     df_filtered['vel_' + col] = df_filtered['vel_' + col].replace([np.inf, -np.inf], 0).fillna(0)
     df_filtered['acc_' + col] = df_filtered['acc_' + col].replace([np.inf, -np.inf], 0).fillna(0)
 
+# ── Initialize CoM columns before the loop 
+df_filtered['com_x'] = 0.0
+df_filtered['com_y'] = 0.0
+df_filtered['com_z'] = 0.0
+
+# ── Dynamics loop ─
 for idx, d_i in df_filtered.iterrows():
-    q_exp = np.asarray(np.array(d_i[joint_model]), dtype=np.float64)
-    velocities = np.asarray(np.array(d_i[['vel_' + col for col in joint_model]]), dtype=np.float64)
-    accelerations = np.asarray(np.array(d_i[['acc_' + col for col in joint_model]]), dtype=np.float64)
+    q_exp         = d_i[joint_model].to_numpy(dtype=np.float64)
+    velocities    = d_i[['vel_' + col for col in joint_model]].to_numpy(dtype=np.float64)
+    accelerations = d_i[['acc_' + col for col in joint_model]].to_numpy(dtype=np.float64)
+
     tau = pin.rnea(model, data, q_exp, velocities, accelerations)
     for col in joint_model:
         df_filtered.at[idx, 'tau_' + col] = tau[joint_model.index(col)]
 
+    com = pin.centerOfMass(model, data, q_exp)
+    df_filtered.at[idx, 'com_x'] = com[0]
+    df_filtered.at[idx, 'com_y'] = com[1]
+    df_filtered.at[idx, 'com_z'] = com[2]
+
+# Diagnosis 
+print("=== DIAGNOSIS ===")
+print("time unique values  :", df_filtered['time'].nunique())
+print("angle unique values :", df_filtered[joint_model[0]].nunique())
+print("vel unique values   :", df_filtered['vel_' + joint_model[0]].nunique())
+print("com_z unique values :", df_filtered['com_z'].nunique())
+print("time head           :", df_filtered['time'].head(5).tolist())
+print("angle head          :", df_filtered[joint_model[0]].head(5).tolist())
 
 # =====================================================
 # 3. Plots
 # =====================================================
-
 if plot:
-    df_plot = df_filtered.iloc[::10]   # downsample here are free to choose, but for this large dataset, I took the liberty to downsample by 10 for faster plotting. Adjust as needed.
-
     def save_fig(data_cols, title, filename):
-        """Plot columns against time, save PNG, close to free memory."""
         fig, ax = plt.subplots(figsize=(10, 4))
         for col in data_cols:
-            ax.plot(df_plot['time'], df_plot[col], label=col)   # ← explicit x=time fixes straight lines
+            ax.plot(df_filtered['time'].values[::5],
+                    df_filtered[col].values[::5],
+                    label=col, rasterized=True)
         ax.set_title(title)
         ax.set_xlabel("Time (s)")
-        ax.legend(loc="upper right")                  # fixed location — avoids slow "best" scan
+        ax.legend(loc="upper right")
         plt.tight_layout()
-        plt.savefig(filename, dpi=150)
-        plt.close(fig)                                # release memory immediately
+        plt.savefig(filename, dpi=100)
+        plt.close(fig)
         print(f"  Saved: {filename}")
 
     print("=== Saving plots ===")
-    save_fig(joint_model,                            "Joint Angles (rad)",         "plot_angles.png")
-    save_fig(['vel_' + c for c in joint_model],      "Joint Velocities (rad/s)",   "plot_velocities.png")
-    save_fig(['acc_' + c for c in joint_model],      "Joint Accelerations (r/s²)", "plot_accelerations.png")
-    save_fig(['tau_' + c for c in joint_model],      "Joint Torques (Nm)",         "plot_torques.png")
+    save_fig(joint_model,                         "Joint Angles (rad)",          "plot_angles.png")
+    save_fig(['vel_' + c for c in joint_model],   "Joint Velocities (rad/s)",    "plot_velocities.png")
+    save_fig(['acc_' + c for c in joint_model],   "Joint Accelerations (r/s²)",  "plot_accelerations.png")
+    save_fig(['tau_' + c for c in joint_model],   "Joint Torques (Nm)",          "plot_torques.png")
+    save_fig(['com_x', 'com_y', 'com_z'],         "CoM Position (m)",            "plot_CoM.png")
     print("=== All plots saved as PNG ===")
 
 # =====================================================
@@ -293,8 +345,3 @@ for i in range(len(df_filtered)):
     time_module.sleep(rate)
 
 #plt.show()
-# ── Clean shutdown ────────────────────────────────────────────────────────────
-viz.viewer.close()     # close MeshCat server
-del viz
-gc.collect()           # force memory release
-print("=== Done ===")
