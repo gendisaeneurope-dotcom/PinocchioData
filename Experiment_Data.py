@@ -6,22 +6,28 @@ import sys
 print("sys OK")
 from pathlib import Path
 print("pathlib OK")
+import matplotlib
+import matplotlib.pyplot as plt
 from matplotlib.pylab import rand
+matplotlib.use("Agg")
 print("matplotlib OK")
 import numpy as np
 print("numpy OK")
-import matplotlib.pyplot as plt
 print("pyplot OK")
 import pandas as pd
 print("pandas OK")
 import pinocchio as pin
 print("pinocchio OK")
 from pinocchio.visualize import MeshcatVisualizer
+import meshcat.geometry as g
+import meshcat.transformations as tf
 print("MeshcatVisualizer OK")
-import time
+import time as time_module
 print("time OK")
 from scipy.signal import butter, filtfilt
 print("scipy OK")
+import gc
+print("gc OK")
 
 print("=== Imports done ===")
 
@@ -179,69 +185,41 @@ for idx, d_i in df_filtered.iterrows():
     for col in joint_model:
         df_filtered.at[idx, 'tau_' + col] = tau[joint_model.index(col)]
 
+
+# =====================================================
+# 3. Plots
+# =====================================================
+
 if plot:
-    if all(angle in df_filtered.columns for angle in joint_model):
-        fig2, ax2 = plt.subplots()
-        df_filtered[joint_model].plot(ax=ax2, title="Joint Angles")
-        fig3, ax3 = plt.subplots()
-        df_filtered[['vel_' + col for col in joint_model]].plot(ax=ax3, title="Joint Velocities")
-        fig4, ax4 = plt.subplots()
-        df_filtered[['acc_' + col for col in joint_model]].plot(ax=ax4, title="Joint Accelerations")
-        fig5, ax5 = plt.subplots()
-        df_filtered[['tau_' + col for col in joint_model]].plot(ax=ax5, title="Joint Torques")
-        
-        plt.figure()
-        plt.plot(df_filtered['time'], df[all_joints])
-        plt.legend(all_joints)
-        plt.show(block=False)
-        
+    df_plot = df_filtered.iloc[::10]   # downsample here are free to choose, but for this large dataset, I took the liberty to downsample by 10 for faster plotting. Adjust as needed.
 
+    def save_fig(data_cols, title, filename):
+        """Plot columns against time, save PNG, close to free memory."""
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for col in data_cols:
+            ax.plot(df_plot['time'], df_plot[col], label=col)   # ← explicit x=time fixes straight lines
+        ax.set_title(title)
+        ax.set_xlabel("Time (s)")
+        ax.legend(loc="upper right")                  # fixed location — avoids slow "best" scan
+        plt.tight_layout()
+        plt.savefig(filename, dpi=150)
+        plt.close(fig)                                # release memory immediately
+        print(f"  Saved: {filename}")
 
-# =====================================================
-# 3. Visualization setup with MeshCat
-# =====================================================
-
-import meshcat.geometry as g
-import meshcat.transformations as tf
-
-viz = MeshcatVisualizer(model, collision_model, visual_model)
-
-try:
-    viz.initViewer(open=True)  # opens browser automatically
-except ImportError as err:
-    print("Error while initializing the viewer. Install meshcat with: pip install meshcat")
-    print(err)
-    sys.exit(0)
-
-viz.loadViewerModel()
-print("Open MeshCat at: http://127.0.0.1:7000/static/")
-
-q0 = pin.neutral(model)
-viz.display(q0)
-
-rate = 1/60
-
-for i in range(len(df_filtered)):
-    q = df_filtered[joint_model].iloc[i].values.astype(float)
-    viz.display(q)
-
-    com = pin.centerOfMass(model, data, q)
-    viz.viewer['com'].set_object(g.Sphere(0.08), 
-                                  g.MeshLambertMaterial(color=0xff0000))
-    viz.viewer['com'].set_transform(tf.translation_matrix([com[0], com[1], com[2]]))
-
-    time.sleep(rate)
-    
-#plt.show()
+    print("=== Saving plots ===")
+    save_fig(joint_model,                            "Joint Angles (rad)",         "plot_angles.png")
+    save_fig(['vel_' + c for c in joint_model],      "Joint Velocities (rad/s)",   "plot_velocities.png")
+    save_fig(['acc_' + c for c in joint_model],      "Joint Accelerations (r/s²)", "plot_accelerations.png")
+    save_fig(['tau_' + c for c in joint_model],      "Joint Torques (Nm)",         "plot_torques.png")
+    print("=== All plots saved as PNG ===")
 
 # =====================================================
 # 4. Trajectory loop + plots
 # =====================================================
-import pandas as pd
-import matplotlib.pyplot as plt
 
 print("-" * 60)
 print("CSV LOADED — starting trajectory analysis")
+
 # Load CSV
 csv_path = 'Data_1/resynchronized_data_subject003.csv'  # ← replace with your filename
 df = pd.read_csv(csv_path, low_memory=False)
@@ -279,3 +257,44 @@ print(f"Full time range: {t_sync[0]:.2f} → {t_sync[-1]:.2f} s")
 print(f"Total duration: {t_sync[-1] - t_sync[0]:.2f} s")
 print(f"Total rows: {len(df)}")
 print(f"Sampling rate: {1 / np.mean(np.diff(t_sync)):.1f} Hz")
+
+# =====================================================
+# 5. Visualization setup with MeshCat
+# =====================================================
+
+viz = MeshcatVisualizer(model, collision_model, visual_model)
+
+try:
+    viz.initViewer(open=True)          # opens browser automatically
+except ImportError as err:
+    print(f"MeshCat import error: {err}\nInstall with: pip install meshcat")
+    sys.exit(0)
+
+time_module.sleep(2)                           # wait for server to be ready before loading model
+viz.loadViewerModel(rootNodeName=root)     # ← pass mesh_dir so textures/meshes load correctly
+print("MeshCat open at: http://127.0.0.1:7000/static/")
+
+q0 = pin.neutral(model)
+viz.display(q0)                                # show skeleton at neutral pose first
+
+rate = 1 / 60                                  # ~60 fps animation
+
+for i in range(len(df_filtered)):
+    q = df_filtered[joint_model].iloc[i].values.astype(float)
+    viz.display(q)                             # update skeleton pose each frame
+
+    com = pin.centerOfMass(model, data, q)
+    viz.viewer['com'].set_object(              # draw CoM as a red sphere
+        g.Sphere(0.08),
+        g.MeshLambertMaterial(color=0xff0000))
+    viz.viewer['com'].set_transform(
+        tf.translation_matrix([com[0], com[1], com[2]]))
+
+    time_module.sleep(rate)
+
+#plt.show()
+# ── Clean shutdown ────────────────────────────────────────────────────────────
+viz.viewer.close()     # close MeshCat server
+del viz
+gc.collect()           # force memory release
+print("=== Done ===")
