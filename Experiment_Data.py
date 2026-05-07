@@ -1,6 +1,6 @@
 print("=== Script started ===")
 
-import os
+import os, signal
 print("os OK")
 import sys
 print("sys OK")
@@ -33,6 +33,8 @@ print("=== Imports done ===")
 
 root = "world"
 plot = True
+figure_output = 'Plots'
+os.makedirs(figure_output, exist_ok=True)
 
 all_joints = ['Single_leg_ankle_abd', # eversion/inversion    
             'Single_leg_hip_abd', # abduction/adduction
@@ -216,19 +218,53 @@ df_filtered['com_y'] = 0.0
 df_filtered['com_z'] = 0.0
 
 # ── Dynamics loop ─
+tau_results      = {col: [] for col in joint_model}
+tau_fext_results = {col: [] for col in joint_model}
+com_x, com_y, com_z = [], [], []
+
 for idx, d_i in df_filtered.iterrows():
     q_exp         = d_i[joint_model].to_numpy(dtype=np.float64)
     velocities    = d_i[['vel_' + col for col in joint_model]].to_numpy(dtype=np.float64)
     accelerations = d_i[['acc_' + col for col in joint_model]].to_numpy(dtype=np.float64)
 
+    # Torques without external force
     tau = pin.rnea(model, data, q_exp, velocities, accelerations)
     for col in joint_model:
-        df_filtered.at[idx, 'tau_' + col] = tau[joint_model.index(col)]
+        tau_results[col].append(tau[joint_model.index(col)])
 
+    # ── Time-varying external force ───────────────────────────────────────
+    motor_force = float(df.loc[idx, 'motor_force']) if 'motor_force' in df.columns else 0.0
+
+    if motor_force != 0.0:
+        pin.forwardKinematics(model, data, q_exp)
+        com_pos   = pin.centerOfMass(model, data, q_exp)
+        joint_pos = data.oMi[parent_id].translation
+        joint_rot = data.oMi[parent_id].rotation
+        r         = com_pos - joint_pos
+        F         = np.array([0.0, motor_force, 0.0])   # Y-axis (lateral perturbation)
+        M_cross   = np.cross(r, F)
+        fext      = [pin.Force.Zero() for _ in range(model.njoints)]
+        fext[parent_id] = pin.Force(joint_rot.T @ F, joint_rot.T @ M_cross)
+        tau_fext  = pin.rnea(model, data, q_exp, velocities, accelerations, fext)
+        for col in joint_model:
+            tau_fext_results[col].append(tau_fext[joint_model.index(col)])
+    else:
+        for col in joint_model:
+            tau_fext_results[col].append(0.0)
+
+    # CoM
     com = pin.centerOfMass(model, data, q_exp)
-    df_filtered.at[idx, 'com_x'] = com[0]
-    df_filtered.at[idx, 'com_y'] = com[1]
-    df_filtered.at[idx, 'com_z'] = com[2]
+    com_x.append(com[0])
+    com_y.append(com[1])
+    com_z.append(com[2])
+
+# ── Bulk assign after loop ────────────────────────────────────────────────
+for col in joint_model:
+    df_filtered['tau_' + col]      = tau_results[col]
+    df_filtered['tau_fext_' + col] = tau_fext_results[col]
+df_filtered['com_x'] = com_x  # left-right
+df_filtered['com_y'] = com_y  # forward-backward
+df_filtered['com_z'] = com_z  # vertical (height)
 
 # Diagnosis 
 print("=== DIAGNOSIS ===")
@@ -242,6 +278,7 @@ print("angle head          :", df_filtered[joint_model[0]].head(5).tolist())
 # =====================================================
 # 3. Plots
 # =====================================================
+
 if plot:
     def save_fig(data_cols, title, filename):
         fig, ax = plt.subplots(figsize=(10, 4))
@@ -253,7 +290,7 @@ if plot:
         ax.set_xlabel("Time (s)")
         ax.legend(loc="upper right")
         plt.tight_layout()
-        plt.savefig(filename, dpi=100)
+        plt.savefig(os.path.join(figure_output, filename), dpi=100)
         plt.close(fig)
         print(f"  Saved: {filename}")
 
@@ -277,6 +314,7 @@ csv_path = 'Data_1/resynchronized_data_subject003.csv'  # ← replace with your 
 df = pd.read_csv(csv_path, low_memory=False)
 df["t_sync"] = pd.to_numeric(df["t_sync"], errors="coerce")
 df = df.dropna(subset=["t_sync"]).reset_index(drop=True)
+df["t_sync"] = df["t_sync"] - df["t_sync"].iloc[0]
 
 # Compute angles
 deg2rad = np.pi / 180.0
@@ -316,32 +354,39 @@ print(f"Sampling rate: {1 / np.mean(np.diff(t_sync)):.1f} Hz")
 
 viz = MeshcatVisualizer(model, collision_model, visual_model)
 
-try:
-    viz.initViewer(open=True)          # opens browser automatically
-except ImportError as err:
-    print(f"MeshCat import error: {err}\nInstall with: pip install meshcat")
-    sys.exit(0)
+viz.initViewer(zmq_url="tcp://127.0.0.1:6001", open=False)
 
-time_module.sleep(2)                           # wait for server to be ready before loading model
-viz.loadViewerModel(rootNodeName=root)     # ← pass mesh_dir so textures/meshes load correctly
-print("MeshCat open at: http://127.0.0.1:7000/static/")
+time_module.sleep(2)
+viz.loadViewerModel(rootNodeName=root)
+print("MeshCat open at: http://127.0.0.1:7001/static/")
 
 q0 = pin.neutral(model)
 viz.display(q0)                                # show skeleton at neutral pose first
 
 rate = 1 / 60                                  # ~60 fps animation
 
-for i in range(len(df_filtered)):
-    q = df_filtered[joint_model].iloc[i].values.astype(float)
-    viz.display(q)                             # update skeleton pose each frame
+# Set CoM sphere geometry once, before the loop
+viz.viewer['com'].set_object(
+    g.Sphere(0.08),
+    g.MeshLambertMaterial(color=0xff0000))
 
-    com = pin.centerOfMass(model, data, q)
-    viz.viewer['com'].set_object(              # draw CoM as a red sphere
-        g.Sphere(0.08),
-        g.MeshLambertMaterial(color=0xff0000))
-    viz.viewer['com'].set_transform(
-        tf.translation_matrix([com[0], com[1], com[2]]))
+try:
+    for i in range(len(df_filtered)):
+        q = df_filtered[joint_model].iloc[i].values.astype(float)
+        viz.display(q)
 
-    time_module.sleep(rate)
+        com = df_filtered[['com_x', 'com_y', 'com_z']].iloc[i].values.astype(float)
+        viz.viewer['com'].set_transform(
+            tf.translation_matrix(com))
+
+        time_module.sleep(rate)
+finally:
+    proc = viz.viewer.window.server_proc
+    proc.terminate()          # polite shutdown first
+    try:
+        proc.wait(timeout=3)  # give it 3 seconds
+    except Exception:
+        os.kill(proc.pid, signal.SIGTERM)  # force if still alive
+    print("MeshCat stopped. Script finished.")
 
 #plt.show()
