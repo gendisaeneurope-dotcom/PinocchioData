@@ -212,51 +212,64 @@ for col in joint_model:
     df_filtered['vel_' + col] = df_filtered['vel_' + col].replace([np.inf, -np.inf], 0).fillna(0)
     df_filtered['acc_' + col] = df_filtered['acc_' + col].replace([np.inf, -np.inf], 0).fillna(0)
 
-# ── Initialize CoM columns before the loop 
+# CoM columns before the loop 
 df_filtered['com_x'] = 0.0
 df_filtered['com_y'] = 0.0
 df_filtered['com_z'] = 0.0
+df_filtered['com_error_x'] = 0.0
+df_filtered['com_error_y'] = 0.0
+df_filtered['com_error_z'] = 0.0
 
 # ── Dynamics loop ─
 tau_results      = {col: [] for col in joint_model}
 tau_fext_results = {col: [] for col in joint_model}
 com_x, com_y, com_z = [], [], []
+com_error_x, com_error_y, com_error_z = [], [], []
 
 for idx, d_i in df_filtered.iterrows():
     q_exp         = d_i[joint_model].to_numpy(dtype=np.float64)
     velocities    = d_i[['vel_' + col for col in joint_model]].to_numpy(dtype=np.float64)
     accelerations = d_i[['acc_' + col for col in joint_model]].to_numpy(dtype=np.float64)
 
-    # Torques without external force
+    # 1. Torques without external force (RNEA)
     tau = pin.rnea(model, data, q_exp, velocities, accelerations)
     for col in joint_model:
         tau_results[col].append(tau[joint_model.index(col)])
 
-    # ── Time-varying external force ───────────────────────────────────────
+    # 2. CoM position
+    com = pin.centerOfMass(model, data, q_exp)
+    com_x.append(com[0])
+    com_y.append(com[1])
+    com_z.append(com[2])
+
+    # 3. CoM error (desired = no lateral drift, same height)
+    com_desired = np.array([0.0, 0.0, com[2]])   # stay centered, keep height
+    com_error   = com_desired - com
+    com_error_x.append(com_error[0])
+    com_error_y.append(com_error[1])
+    com_error_z.append(com_error[2])
+
+    # 4. Torques WITH external perturbation force ───────────────────────────────────────
     motor_force = float(df.loc[idx, 'motor_force']) if 'motor_force' in df.columns else 0.0
 
     if motor_force != 0.0:
         pin.forwardKinematics(model, data, q_exp)
-        com_pos   = pin.centerOfMass(model, data, q_exp)
-        joint_pos = data.oMi[parent_id].translation
-        joint_rot = data.oMi[parent_id].rotation
-        r         = com_pos - joint_pos
-        F         = np.array([0.0, motor_force, 0.0])   # Y-axis (lateral perturbation)
-        M_cross   = np.cross(r, F)
-        fext      = [pin.Force.Zero() for _ in range(model.njoints)]
-        fext[parent_id] = pin.Force(joint_rot.T @ F, joint_rot.T @ M_cross)
-        tau_fext  = pin.rnea(model, data, q_exp, velocities, accelerations, fext)
+        com_pos    = pin.centerOfMass(model, data, q_exp)
+        joint_pos  = data.oMi[parent_id].translation
+        joint_rot  = data.oMi[parent_id].rotation
+        r          = com_pos - joint_pos
+        F          = np.array([0.0, motor_force, 0.0])   # Y-axis (lateral perturbation)
+        M          = np.cross(r, F)
+        fext       = [pin.Force.Zero() for _ in range(model.njoints)]
+        fext[parent_id] = pin.Force(joint_rot.T @ F, joint_rot.T @ M)
+        tau_fext = pin.rnea(model, data, q_exp, velocities, accelerations, fext) 
+        
         for col in joint_model:
             tau_fext_results[col].append(tau_fext[joint_model.index(col)])
     else:
         for col in joint_model:
             tau_fext_results[col].append(0.0)
 
-    # CoM
-    com = pin.centerOfMass(model, data, q_exp)
-    com_x.append(com[0])
-    com_y.append(com[1])
-    com_z.append(com[2])
 
 # ── Bulk assign after loop ────────────────────────────────────────────────
 for col in joint_model:
@@ -265,128 +278,83 @@ for col in joint_model:
 df_filtered['com_x'] = com_x  # left-right
 df_filtered['com_y'] = com_y  # forward-backward
 df_filtered['com_z'] = com_z  # vertical (height)
+df_filtered['com_error_x'] = com_error_x  # left-right
+df_filtered['com_error_y'] = com_error_y  # forward-backward
+df_filtered['com_error_z'] = com_error_z  # vertical (height)
 
-# Diagnosis 
-print("=== DIAGNOSIS ===")
-print("time unique values  :", df_filtered['time'].nunique())
-print("angle unique values :", df_filtered[joint_model[0]].nunique())
-print("vel unique values   :", df_filtered['vel_' + joint_model[0]].nunique())
-print("com_z unique values :", df_filtered['com_z'].nunique())
-print("time head           :", df_filtered['time'].head(5).tolist())
-print("angle head          :", df_filtered[joint_model[0]].head(5).tolist())
+# ── Copy block/trial info from original df ───────────────────────────────
+df_filtered['block_id'] = df['block_idx'].round(-3).values   #rounds to the nearest 1000
+df_filtered['motor_force'] = df['motor_force'].values
 
-# =====================================================
-# 3. Plots
-# =====================================================
+df_filtered.to_csv('Data_1/Subject3_processed.csv', index=False)
+print("Saved → Data_1/Subject3_processed.csv")
 
-if plot:
-    def save_fig(data_cols, title, filename):
-        fig, ax = plt.subplots(figsize=(10, 4))
-        for col in data_cols:
-            ax.plot(df_filtered['time'].values[::5],
-                    df_filtered[col].values[::5],
-                    label=col, rasterized=True)
-        ax.set_title(title)
-        ax.set_xlabel("Time (s)")
-        ax.legend(loc="upper right")
-        plt.tight_layout()
-        plt.savefig(os.path.join(figure_output, filename), dpi=100)
-        plt.close(fig)
-        print(f"  Saved: {filename}")
+# ── Save IRL feature matrix ───────────────────────────────────────────────
+df_out = pd.DataFrame({
+    'time':         df_filtered['time'].values,
+    'block_id':    df_filtered['block_id'].values,
+    'com_x':        com_x,
+    'com_y':        com_y,
+    'com_z':        com_z,
+    'com_error_x':  com_error_x,
+    'com_error_y':  com_error_y,
+    'com_error_z':  com_error_z,
+    'motor_force':    df_filtered['motor_force'].values
+})
 
-    print("=== Saving plots ===")
-    save_fig(joint_model,                         "Joint Angles (rad)",          "plot_angles.png")
-    save_fig(['vel_' + c for c in joint_model],   "Joint Velocities (rad/s)",    "plot_velocities.png")
-    save_fig(['acc_' + c for c in joint_model],   "Joint Accelerations (r/s²)",  "plot_accelerations.png")
-    save_fig(['tau_' + c for c in joint_model],   "Joint Torques (Nm)",          "plot_torques.png")
-    save_fig(['com_x', 'com_y', 'com_z'],         "CoM Position (m)",            "plot_CoM.png")
-    print("=== All plots saved as PNG ===")
+for col in joint_model:
+    df_out['tau_' + col]      = tau_results[col]
+    df_out['tau_fext_' + col] = tau_fext_results[col]
 
-# =====================================================
-# 4. Trajectory loop + plots
-# =====================================================
+df_out.to_csv('Data_1/Subject3_features.csv', index=False)
+print("Saved → Data_1/Subject3_features.csv")
 
-print("-" * 60)
-print("CSV LOADED — starting trajectory analysis")
+# ── PD Controller ─────────────────────────────────────────────────────────
+Kp = 100.0
+Kd = 10.0
 
-# Load CSV
-csv_path = 'Data_1/resynchronized_data_subject003.csv'  # ← replace with your filename
-df = pd.read_csv(csv_path, low_memory=False)
-df["t_sync"] = pd.to_numeric(df["t_sync"], errors="coerce")
-df = df.dropna(subset=["t_sync"]).reset_index(drop=True)
-df["t_sync"] = df["t_sync"] - df["t_sync"].iloc[0]
+df_out['com_error_y_dot'] = df_out['com_error_y'].diff() / df_out['time'].diff()
+df_out['com_error_y_dot'] = df_out['com_error_y_dot'].fillna(0)
+df_out['tau_PD']          = Kp * df_out['com_error_y'] + Kd * df_out['com_error_y_dot']
 
-# Compute angles
-deg2rad = np.pi / 180.0
-df['Single_leg_hip_abd']    = 0.5 * (df['hip_adduction_r'] - df['hip_adduction_l']) * deg2rad
-df['Single_leg_hip_flex']   = 0.5 * (df['hip_flexion_r']   + df['hip_flexion_l'])   * deg2rad
-df['Single_leg_ankle_flex'] = df['subtalar_sagittal_tilt_rad']
-df['Single_leg_ankle_abd']  = df['subtalar_frontal_tilt_rad']
+df_out.to_csv('Data_1/Subject3_features.csv', index=False)
+print("PD torques added → Subject3_features.csv")
 
-time = df['t_sync'].values
-print(f"CSV loaded: {df.shape[0]} rows, {df.shape[1]} columns")
-print(f"Time range: {time[0]:.3f} → {time[-1]:.3f} s")
-print("-" * 60)
+# ── Scale motor_force from mN to N ───────────────────────────────────────
+df['motor_force']           = df['motor_force'] / 1000.0
+df_filtered['motor_force']  = df_filtered['motor_force'] / 1000.0
+df_out['motor_force']       = df_out['motor_force'] / 1000.0
 
-print(df.columns[:10].tolist())  # first 10 columns
-print(df.columns[-10:].tolist())  # last 10 columns
-print(df['marker_timestamp'].unique()[:10])
+# ── Jᵀ mapping ───────────────────────────────────────────────────────────
+tau_Jt_results = {col: [] for col in joint_model}
 
-# Find where t_sync resets (new trial starts)
-t_sync = df["t_sync"].values
-restarts = np.where(np.diff(t_sync) < 0)[0] + 1
-print(f"Number of trials: {len(restarts) + 1}")
-print(f"Trial start indices: {restarts}")
+for idx, d_i in df_filtered.iterrows():
+    q_exp       = d_i[joint_model].to_numpy(dtype=np.float64)
+    motor_force = float(df.loc[idx, 'motor_force']) if 'motor_force' in df.columns else 0.0
 
-print(df["t_sync"].iloc[:5].tolist())   # start of first trial
-if len(restarts) > 0:
-    print(df["t_sync"].iloc[restarts[0]-2 : restarts[0]+3].tolist())  # around first restart
+    if motor_force != 0.0:
+        pin.forwardKinematics(model, data, q_exp)
+        pin.computeJointJacobians(model, data, q_exp)
+        J_CoM        = pin.jacobianCenterOfMass(model, data, q_exp)
+        F            = np.array([0.0, motor_force, 0.0])
+        tau_de_force = J_CoM.T @ F
+        for col in joint_model:
+            tau_Jt_results[col].append(tau_de_force[joint_model.index(col)])
+    else:
+        for col in joint_model:
+            tau_Jt_results[col].append(0.0)
 
-# Full time range
-print(f"Full time range: {t_sync[0]:.2f} → {t_sync[-1]:.2f} s")
-print(f"Total duration: {t_sync[-1] - t_sync[0]:.2f} s")
-print(f"Total rows: {len(df)}")
-print(f"Sampling rate: {1 / np.mean(np.diff(t_sync)):.1f} Hz")
+for col in joint_model:
+    df_out['tau_Jt_' + col] = tau_Jt_results[col]
 
-# =====================================================
-# 5. Visualization setup with MeshCat
-# =====================================================
+df_out.to_csv('Data_1/Subject3_features.csv', index=False)
+print("Jᵀ torques added → Subject3_features.csv")
 
-viz = MeshcatVisualizer(model, collision_model, visual_model)
+# Run for one perturbed frame to see raw values
+idx = 35100
+q_exp = df_filtered.loc[idx, joint_model].to_numpy(dtype=np.float64)
+pin.forwardKinematics(model, data, q_exp)
+com_pos = pin.centerOfMass(model, data, q_exp)
+print("CoM position (m?):", com_pos)
+print(df['block_id'].value_counts().sort_index())
 
-viz.initViewer(zmq_url="tcp://127.0.0.1:6001", open=False)
-
-time_module.sleep(2)
-viz.loadViewerModel(rootNodeName=root)
-print("MeshCat open at: http://127.0.0.1:7001/static/")
-
-q0 = pin.neutral(model)
-viz.display(q0)                                # show skeleton at neutral pose first
-
-rate = 1 / 60                                  # ~60 fps animation
-
-# Set CoM sphere geometry once, before the loop
-viz.viewer['com'].set_object(
-    g.Sphere(0.08),
-    g.MeshLambertMaterial(color=0xff0000))
-
-try:
-    for i in range(len(df_filtered)):
-        q = df_filtered[joint_model].iloc[i].values.astype(float)
-        viz.display(q)
-
-        com = df_filtered[['com_x', 'com_y', 'com_z']].iloc[i].values.astype(float)
-        viz.viewer['com'].set_transform(
-            tf.translation_matrix(com))
-
-        time_module.sleep(rate)
-finally:
-    proc = viz.viewer.window.server_proc
-    proc.terminate()          # polite shutdown first
-    try:
-        proc.wait(timeout=3)  # give it 3 seconds
-    except Exception:
-        os.kill(proc.pid, signal.SIGTERM)  # force if still alive
-    print("MeshCat stopped. Script finished.")
-
-#plt.show()
