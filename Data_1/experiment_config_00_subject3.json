@@ -1,0 +1,188 @@
+{
+    "experiment": [
+        {
+            "catch_trial_idxs": [],
+            "channel_amplification": 40.0,
+            "channel_trial_idxs": [
+                9,
+                21,
+                28,
+                41
+            ],
+            "desired_trial_time": [
+                0.7,
+                1.5
+            ],
+            "desired_velocity": [
+                0.0,
+                0.2
+            ],
+            "force_amplification": 3.5,
+            "force_direction": "forward",
+            "force_mode": "none",
+            "state_wait_time_range": [
+                1,
+                3
+            ],
+            "total_time": 0,
+            "total_trials": 50
+        },
+        {
+            "catch_trial_idxs": [
+                0,
+                1,
+                2,
+                3
+            ],
+            "channel_amplification": 40.0,
+            "channel_trial_idxs": [
+                11,
+                19,
+                28,
+                39
+            ],
+            "desired_trial_time": [
+                0.7,
+                1.5
+            ],
+            "desired_velocity": [
+                0.0,
+                0.2
+            ],
+            "force_amplification": 3.5,
+            "force_direction": "forward",
+            "force_mode": "regular",
+            "state_wait_time_range": [
+                1,
+                3
+            ],
+            "total_time": 0,
+            "total_trials": 50
+        },
+        {
+            "catch_trial_idxs": [],
+            "channel_amplification": 40.0,
+            "channel_trial_idxs": [
+                9,
+                21,
+                28,
+                41
+            ],
+            "desired_trial_time": [
+                0.7,
+                1.5
+            ],
+            "desired_velocity": [
+                0.0,
+                0.2
+            ],
+            "force_amplification": 3.5,
+            "force_direction": "forward",
+            "force_mode": "regular",
+            "state_wait_time_range": [
+                1,
+                3
+            ],
+            "total_time": 0,
+            "total_trials": 50
+        },
+        {
+            "catch_trial_idxs": [],
+            "channel_amplification": 40.0,
+            "channel_trial_idxs": [
+                11,
+                19,
+                28,
+                39
+            ],
+            "desired_trial_time": [
+                0.7,
+                1.5
+            ],
+            "desired_velocity": [
+                0.0,
+                0.2
+            ],
+            "force_amplification": 3.5,
+            "force_direction": "forward",
+            "force_mode": "regular",
+            "state_wait_time_range": [
+                1,
+                3
+            ],
+            "total_time": 0,
+            "total_trials": 50
+        },
+        {
+            "catch_trial_idxs": [
+                19,
+                34
+            ],
+            "channel_amplification": 40.0,
+            "channel_trial_idxs": [
+                10,
+                42
+            ],
+            "desired_trial_time": [
+                0.7,
+                1.5
+            ],
+            "desired_velocity": [
+                0.0,
+                0.2
+            ],
+            "force_amplification": 3.5,
+            "force_direction": "forward",
+            "force_mode": "regular",
+            "state_wait_time_range": [
+                1,
+                3
+            ],
+            "total_time": 0,
+            "total_trials": 50
+        },
+        {
+            "catch_trial_idxs": [],
+            "channel_amplification": 40.0,
+            "channel_trial_idxs": [
+                9,
+                21,
+                28,
+                41
+            ],
+            "desired_trial_time": [
+                0.7,
+                1.5
+            ],
+            "desired_velocity": [
+                0.0,
+                0.2
+            ],
+            "force_amplification": 3.5,
+            "force_direction": "forward",
+            "force_mode": "none",
+            "state_wait_time_range": [
+                1,
+                3
+            ],
+            "total_time": 0,
+            "total_trials": 50
+        }
+    ],
+    "experiment_pause_duration": 5,
+    "interface": {
+        "display_scaling": 2.0,
+        "pixels_per_m": 3200
+    },
+    "participant": {
+        "age": 26,
+        "gender": "f",
+        "height": 1.75,
+        "id": 3,
+        "name": "Brina",
+        "weight": 69
+    },
+    "refresh_frequency": 200,
+    "results_path": "./trial_results",
+    "velocity_buffer_size": 5
+}

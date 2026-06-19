@@ -33,8 +33,10 @@ all_joints = ['L_ankle_flex','L_ankle_abd', 'L_knee_flex', 'L_hip_abd', 'L_hip_f
               'Single_leg_ankle_abd', 'Single_leg_hip_abd']
 
 joint_model = [
-            'Single_leg_ankle_abd',    
-            'Single_leg_hip_abd',       
+            'Single_leg_ankle_abd', # eversion/inversion    
+            'Single_leg_hip_abd', # abduction/adduction
+            'Single_leg_hip_flex', # flexion/extension
+            'Single_leg_ankle_flex' # plantar/dorsiflexion
             ]
 
 
@@ -226,4 +228,50 @@ for i in range(len(df_filtered)):
 
     time.sleep(rate)
     
-plt.show()
+#plt.show()
+
+# =====================================================
+# 4. Trajectory loop + plots
+# =====================================================
+import pandas as pd
+import matplotlib.pyplot as plt
+
+print("-" * 60)
+print("CSV LOADED — starting trajectory analysis")
+# Load CSV
+csv_path = 'Data_1/resynchronized_data_subject003.csv'  # ← replace with your filename
+df = pd.read_csv(csv_path, low_memory=False)
+df["t_sync"] = pd.to_numeric(df["t_sync"], errors="coerce")
+df = df.dropna(subset=["t_sync"]).reset_index(drop=True)
+
+# Compute angles
+deg2rad = np.pi / 180.0
+df['Single_leg_hip_abd']    = 0.5 * (df['hip_adduction_r'] - df['hip_adduction_l']) * deg2rad
+df['Single_leg_hip_flex']   = 0.5 * (df['hip_flexion_r']   + df['hip_flexion_l'])   * deg2rad
+df['Single_leg_ankle_flex'] = df['subtalar_sagittal_tilt_rad']
+df['Single_leg_ankle_abd']  = df['subtalar_frontal_tilt_rad']
+
+time = df['t_sync'].values
+print(f"CSV loaded: {df.shape[0]} rows, {df.shape[1]} columns")
+print(f"Time range: {time[0]:.3f} → {time[-1]:.3f} s")
+print("-" * 60)
+
+print(df.columns[:10].tolist())  # first 10 columns
+print(df.columns[-10:].tolist())  # last 10 columns
+print(df['marker_timestamp'].unique()[:10])
+
+# Find where t_sync resets (new trial starts)
+t_sync = df["t_sync"].values
+restarts = np.where(np.diff(t_sync) < 0)[0] + 1
+print(f"Number of trials: {len(restarts) + 1}")
+print(f"Trial start indices: {restarts}")
+
+print(df["t_sync"].iloc[:5].tolist())   # start of first trial
+if len(restarts) > 0:
+    print(df["t_sync"].iloc[restarts[0]-2 : restarts[0]+3].tolist())  # around first restart
+
+# Full time range
+print(f"Full time range: {t_sync[0]:.2f} → {t_sync[-1]:.2f} s")
+print(f"Total duration: {t_sync[-1] - t_sync[0]:.2f} s")
+print(f"Total rows: {len(df)}")
+print(f"Sampling rate: {1 / np.mean(np.diff(t_sync)):.1f} Hz")

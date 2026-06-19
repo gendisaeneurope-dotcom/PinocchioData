@@ -1,0 +1,509 @@
+# =====================================================
+# Phase 0 — Model Validation & Data Exploration
+# Load URDF, compute dynamics, plot experimental data.
+# NO controller, NO PD, NO com_error.
+# =====================================================
+print("=== Script started ===")
+import os, signal, gc, glob
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import pinocchio as pin
+from scipy.signal import butter, filtfilt
+import time as time_module
+print("=== Imports done ===")
+
+
+# ── Config ───────────────────────────────────────────────────────────────
+PLOT_DIR         = 'Plots'
+TRIAL_DIR        = 'Data_1/trials'
+CSV_RAW          = 'Data_1/resynchronized_data_subject003.csv'
+CSV_OUT          = 'Data_1/Subject3_features.csv'
+URDF_NAME        = 'subject3_single_leg_4dof.urdf'
+TRIAL_MIN_FRAMES = 50
+FORCE_THRESHOLD  = 20.0   # N (after mN → N conversion)
+
+JOINT_MODEL = [
+    'Single_leg_ankle_abd',
+    'Single_leg_hip_abd',
+    'Single_leg_hip_flex',
+    'Single_leg_ankle_flex',
+]
+
+os.makedirs(PLOT_DIR,  exist_ok=True)
+os.makedirs(TRIAL_DIR, exist_ok=True)
+
+
+# =====================================================
+# 1. Build Pinocchio model
+# =====================================================
+mesh_dir  = os.path.dirname(os.path.abspath(__file__))
+urdf_path = os.path.join(mesh_dir, URDF_NAME)
+model, collision_model, visual_model = pin.buildModelsFromUrdf(urdf_path, mesh_dir)
+data = model.createData()
+
+q0 = pin.neutral(model)
+v0 = np.zeros(model.nv)
+a0 = np.zeros(model.nv)
+
+total_mass = sum(model.inertias[i].mass for i in range(model.njoints))
+com0       = pin.centerOfMass(model, data, q0)
+M_mat      = pin.crba(model, data, q0)
+h          = pin.rnea(model, data, q0, v0, a0)
+tau_eom    = M_mat @ a0 + h
+
+pin.computeJointJacobians(model, data, q0)
+J = pin.getJointJacobian(
+    model, data, model.njoints - 1, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+)
+
+parent_id  = model.getJointId("hip_c_rotation1")
+pin.forwardKinematics(model, data, q0)
+com_pos    = pin.centerOfMass(model, data, q0)
+parent_pos = data.oMi[parent_id].translation
+r          = com_pos - parent_pos
+F_test     = np.array([0.0, 0.0, 10.0])
+M_cross    = np.cross(r, F_test)
+R          = data.oMi[parent_id].rotation
+fext_test  = [pin.Force.Zero() for _ in range(model.njoints)]
+fext_test[parent_id] = pin.Force(R.T @ F_test, R.T @ M_cross)
+tau_with_fext = pin.rnea(model, data, q0, v0, a0, fext_test)
+
+with open("model_info.txt", "w") as f:
+    f.write(f"Total mass: {total_mass}\n")
+    f.write(f"CoM at neutral: {com0}\n")
+    f.write("Joint limits:\n")
+    for i in range(1, model.njoints):
+        lo = model.lowerPositionLimit[i - 1]
+        hi = model.upperPositionLimit[i - 1]
+        f.write(f"  {model.names[i]}: [{lo:.3f}, {hi:.3f}] rad\n")
+    f.write(f"Gravity: {model.gravity.linear}\n")
+    f.write(f"Jacobian (last joint):\n{J}\n")
+    f.write(f"Mass matrix M(q):\n{M_mat}\n")
+    f.write(f"h(q, qdot): {h}\n")
+    f.write(f"tau_eom: {tau_eom}\n")
+    f.write(f"tau_with_fext: {tau_with_fext}\n")
+print("Saved -> model_info.txt")
+
+
+# =====================================================
+# 2. Load CSV + Dynamics Loop
+# =====================================================
+df_raw = pd.read_csv(CSV_RAW)
+
+# mN -> N conversion — must happen before any threshold logic
+df_raw['motor_force'] = df_raw['motor_force'] / 1000.0
+
+df_raw[JOINT_MODEL] = np.deg2rad(df_raw[JOINT_MODEL].astype(float))
+df_raw = df_raw.dropna(subset=JOINT_MODEL).reset_index(drop=True)
+df_raw['time'] = df_raw['marker_timestamp'] - df_raw['marker_timestamp'].iloc[0]
+
+# Low-pass filter (4th order Butterworth, 3 Hz cutoff)
+dt_mean   = df_raw['time'].diff().mean()
+nyquist   = 1 / (2 * dt_mean)
+b, a_filt = butter(4, 3 / nyquist, btype='low')
+
+df_filt = pd.DataFrame({'time': df_raw['time'].values})
+for col in JOINT_MODEL:
+    df_filt[col] = filtfilt(b, a_filt, df_raw[col].astype(float))
+
+# Velocities & accelerations via finite differences
+dt = df_filt['time'].diff()
+for col in JOINT_MODEL:
+    vel = (df_filt[col].diff() / dt).replace([np.inf, -np.inf], 0).fillna(0)
+    acc = (vel.diff()           / dt).replace([np.inf, -np.inf], 0).fillna(0)
+    df_filt[f'vel_{col}'] = vel
+    df_filt[f'acc_{col}'] = acc
+
+df_filt['motor_force'] = df_raw['motor_force'].values
+df_filt['block_id']    = df_raw['block_idx'].round(-3).values
+
+# ── Main dynamics loop — RNEA + CoM ──────────────────────────────────────
+tau_buf = {col: [] for col in JOINT_MODEL}
+com_buf = {'com_x': [], 'com_y': [], 'com_z': []}
+
+for idx, row in df_filt.iterrows():
+    if idx % 5000 == 0:
+        print(f"  Frame {idx}/{len(df_filt)}...")
+
+    q   = row[JOINT_MODEL].to_numpy(dtype=np.float64)
+    vel = row[[f'vel_{c}' for c in JOINT_MODEL]].to_numpy(dtype=np.float64)
+    acc = row[[f'acc_{c}' for c in JOINT_MODEL]].to_numpy(dtype=np.float64)
+
+    tau = pin.rnea(model, data, q, vel, acc)
+    for col in JOINT_MODEL:
+        tau_buf[col].append(tau[JOINT_MODEL.index(col)])
+
+    com = pin.centerOfMass(model, data, q)
+    com_buf['com_x'].append(com[0])
+    com_buf['com_y'].append(com[1])
+    com_buf['com_z'].append(com[2])
+
+print("  Main loop done.")
+
+for col in JOINT_MODEL:
+    df_filt[f'tau_{col}'] = tau_buf[col]
+for key, vals in com_buf.items():
+    df_filt[key] = vals
+
+# ── tau_fext + tau_Jt on perturbed frames only ────────────────────────────
+for col in JOINT_MODEL:
+    df_filt[f'tau_fext_{col}'] = 0.0
+    df_filt[f'tau_Jt_{col}']   = 0.0
+
+perturbed_idx = df_filt[df_filt['motor_force'].abs() > 0.1].index
+print(f"  tau_fext for {len(perturbed_idx)} perturbed frames...")
+
+for count, idx in enumerate(perturbed_idx):
+    if count % 2000 == 0:
+        print(f"  Perturbed {count}/{len(perturbed_idx)}...")
+
+    row     = df_filt.loc[idx]
+    q       = row[JOINT_MODEL].to_numpy(dtype=np.float64)
+    vel     = row[[f'vel_{c}' for c in JOINT_MODEL]].to_numpy(dtype=np.float64)
+    acc     = row[[f'acc_{c}' for c in JOINT_MODEL]].to_numpy(dtype=np.float64)
+    motor_f = float(row['motor_force'])
+
+    pin.forwardKinematics(model, data, q)
+    com_pos = pin.centerOfMass(model, data, q)
+    jnt_pos = data.oMi[parent_id].translation
+    jnt_rot = data.oMi[parent_id].rotation
+    r       = com_pos - jnt_pos
+    F       = np.array([0.0, motor_f, 0.0])
+    fext    = [pin.Force.Zero() for _ in range(model.njoints)]
+    fext[parent_id] = pin.Force(jnt_rot.T @ F, jnt_rot.T @ np.cross(r, F))
+    tau_fext_val = pin.rnea(model, data, q, vel, acc, fext)
+
+    pin.computeJointJacobians(model, data, q)
+    J_com  = pin.jacobianCenterOfMass(model, data, q)
+    tau_jt = J_com.T @ F
+
+    for col in JOINT_MODEL:
+        i = JOINT_MODEL.index(col)
+        df_filt.loc[idx, f'tau_fext_{col}'] = tau_fext_val[i]
+        df_filt.loc[idx, f'tau_Jt_{col}']   = tau_jt[i]
+
+print("  tau_fext + tau_Jt done.")
+
+# ── Save features CSV ─────────────────────────────────────────────────────
+out_cols = (
+    ['time', 'block_id', 'motor_force']
+    + JOINT_MODEL
+    + [f'vel_{c}' for c in JOINT_MODEL]
+    + [f'tau_{c}' for c in JOINT_MODEL]
+    + [f'tau_fext_{c}' for c in JOINT_MODEL]
+    + [f'tau_Jt_{c}' for c in JOINT_MODEL]
+    + ['com_x', 'com_y', 'com_z']
+)
+df_filt[out_cols].to_csv(CSV_OUT, index=False)
+print(f"Saved -> {CSV_OUT}")
+
+
+# =====================================================
+# 3. Overview Plots + Per-Trial Plots
+# =====================================================
+def _save_overview(cols, title, filename):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for col in cols:
+        ax.plot(df_filt['time'].values[::5], df_filt[col].values[::5],
+                label=col, rasterized=True)
+    ax.set_title(title)
+    ax.set_xlabel("Time (s)")
+    ax.legend(loc="upper right", fontsize=7)
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOT_DIR, filename), dpi=100)
+    plt.close(fig)
+
+_save_overview(JOINT_MODEL,                        "Joint Angles (rad)",         "plot_angles.png")
+_save_overview([f'vel_{c}' for c in JOINT_MODEL],  "Joint Velocities (rad/s)",   "plot_velocities.png")
+_save_overview([f'acc_{c}' for c in JOINT_MODEL],  "Joint Accelerations (r/s2)", "plot_accelerations.png")
+_save_overview([f'tau_{c}' for c in JOINT_MODEL],  "Joint Torques (Nm)",         "plot_torques.png")
+_save_overview(['com_x', 'com_y', 'com_z'],         "CoM Position (m)",           "plot_CoM.png")
+print("=== Overview plots saved ===")
+
+# ── Trial detection ───────────────────────────────────────────────────────
+df = pd.read_csv(CSV_OUT)
+
+print("\nmotor_force stats:")
+print(df['motor_force'].describe())
+for thresh in [1, 5, 10, 20, 30]:
+    n = (df['motor_force'].abs() > thresh).sum()
+    print(f"  Frames above {thresh}N: {n}")
+
+df['is_perturbed'] = (df['motor_force'].abs() > FORCE_THRESHOLD).astype(int)
+df['trial_id']     = (df['is_perturbed'].diff() == 1).cumsum()
+df.loc[df['is_perturbed'] == 0, 'trial_id'] = -1
+
+trial_lengths = df[df['trial_id'] > 0].groupby('trial_id').size()
+valid_trials  = trial_lengths[trial_lengths >= TRIAL_MIN_FRAMES].index
+print(f"\nTrial length stats:\n{trial_lengths.describe()}")
+print(f"Valid trials: {len(valid_trials)}")
+
+# Block 0 sanity check
+block0 = df[df['block_id'] == 0]
+print(f"\nBlock 0 max |motor_force|: {block0['motor_force'].abs().max():.4f} N")
+print(f"Block 0 perturbed frames:  {block0['is_perturbed'].sum()}")
+
+# ── Block-level force diagnostic ──────────────────────────────────────────
+print("\n=== Block Force Summary ===")
+for block_id in sorted(df['block_id'].unique()):
+    block       = df[df['block_id'] == block_id]
+    max_f       = block['motor_force'].abs().max()
+    n_perturbed = (block['motor_force'].abs() > FORCE_THRESHOLD).sum()
+    duration    = block['time'].max() - block['time'].min()
+    status      = "NO FORCE" if n_perturbed == 0 else f"{n_perturbed} perturbed frames"
+    print(f"  Block {int(block_id):5d} | {duration:6.0f}s | max: {max_f:6.2f}N | {status}")
+
+# ── No-perturbation frames summary ────────────────────────────────────────
+quiet = df[df['is_perturbed'] == 0]
+noisy = df[df['is_perturbed'] == 1]
+print(f"\nTotal quiet frames:     {len(quiet)} ({len(quiet)/len(df)*100:.1f}%)")
+print(f"Total perturbed frames: {len(noisy)} ({len(noisy)/len(df)*100:.1f}%)")
+
+# ── Find last quiet frame before perturbations begin ──────────────────────
+first_perturbed_time = df[df['is_perturbed'] == 1]['time'].min()
+last_quiet_frame     = df[(df['is_perturbed'] == 0) &
+                          (df['time'] < first_perturbed_time)].iloc[-1]
+print(f"\nFirst perturbation at: {first_perturbed_time:.2f}s")
+print(f"Last quiet frame at:   {last_quiet_frame['time']:.2f}s "
+      f"(block {int(last_quiet_frame['block_id'])})")
+
+# ── Force overview plot ────────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(14, 3))
+ax.plot(df['time'], df['motor_force'], color='crimson', lw=0.6, rasterized=True)
+ax.axhline( FORCE_THRESHOLD, color='k', ls='--', lw=0.8, label=f'+{FORCE_THRESHOLD}N threshold')
+ax.axhline(-FORCE_THRESHOLD, color='k', ls='--', lw=0.8)
+ax.axvline(first_perturbed_time, color='orange', lw=1.2, label='First perturbation')
+for i, bid in enumerate(sorted(df['block_id'].unique())):
+    blk = df[df['block_id'] == bid]
+    if i % 2 == 0:
+        ax.axvspan(blk['time'].min(), blk['time'].max(), alpha=0.08, color='steelblue')
+ax.set_xlabel('Time [s]')
+ax.set_ylabel('Motor Force [N]')
+ax.set_title('Full Recording - Motor Force with Block Boundaries')
+ax.legend(fontsize=8)
+plt.tight_layout()
+plt.savefig(os.path.join(PLOT_DIR, 'force_overview.png'), dpi=120)
+plt.close()
+print("Saved -> force_overview.png")
+
+# Clean stale trial plots
+removed = glob.glob(f'{TRIAL_DIR}/*.png')
+for f_path in removed:
+    os.remove(f_path)
+print(f"\nCleaned {len(removed)} old trial plots")
+
+# ── Per-trial 5-panel plots ────────────────────────────────────────────────
+JOINT_COLORS = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+
+for tid in valid_trials:
+    trial = df[df['trial_id'] == tid].reset_index(drop=True)
+    t     = trial['time'] - trial['time'].iloc[0]
+
+    fig, axes = plt.subplots(5, 1, figsize=(10, 12), sharex=True)
+    fig.suptitle(f'Trial {int(tid):03d}', fontsize=13)
+
+    axes[0].plot(t, trial['motor_force'], color='crimson')
+    axes[0].set_ylabel('Motor Force [N]')
+    axes[0].axhline(0, color='k', lw=0.6, ls='--')
+
+    for col, clr in zip(JOINT_MODEL, JOINT_COLORS):
+        axes[1].plot(t, trial[col], label=col.replace('Single_leg_', ''), color=clr)
+    axes[1].set_ylabel('Joint Angles [rad]')
+    axes[1].legend(fontsize=6, ncol=2)
+
+    for col, clr in zip(JOINT_MODEL, JOINT_COLORS):
+        axes[2].plot(t, trial[f'tau_{col}'], label=col.replace('Single_leg_', ''), color=clr)
+    axes[2].set_ylabel('Joint Torques [Nm]')
+    axes[2].legend(fontsize=6, ncol=2)
+    axes[2].axhline(0, color='k', lw=0.6, ls='--')
+
+    axes[3].plot(t, trial['com_x'], label='CoM X', color='steelblue')
+    axes[3].plot(t, trial['com_y'], label='CoM Y', color='darkorange')
+    axes[3].set_ylabel('CoM X/Y [m]')
+    axes[3].legend(fontsize=7)
+    axes[3].axhline(0, color='k', lw=0.6, ls='--')
+
+    axes[4].plot(t, trial['com_z'], color='mediumpurple')
+    axes[4].set_ylabel('CoM Z [m]')
+    axes[4].set_xlabel('Time [s]')
+
+    plt.tight_layout()
+    plt.savefig(f'{TRIAL_DIR}/trial_{int(tid):03d}.png', dpi=120)
+    plt.close()
+
+print(f"Saved {len(valid_trials)} trial plots -> {TRIAL_DIR}/")
+
+# ── Torque comparison: perturbed vs unperturbed ────────────────────────────
+block0_frames    = df[df['block_id'] == 0].copy().reset_index(drop=True)
+unperturbed_mean = {f'tau_{col}': block0_frames[f'tau_{col}'].mean()
+                    for col in JOINT_MODEL}
+
+median_len     = int(trial_lengths.median())
+perturbed_segs = {col: [] for col in JOINT_MODEL}
+for tid in valid_trials:
+    seg = df[df['trial_id'] == tid].reset_index(drop=True)
+    for col in JOINT_MODEL:
+        perturbed_segs[col].append(seg[f'tau_{col}'].values)
+
+fig, axes = plt.subplots(4, 1, figsize=(11, 12), sharex=True)
+fig.suptitle('Joint Torques - Perturbed vs Unperturbed', fontsize=13)
+
+for i, (col, clr) in enumerate(zip(JOINT_MODEL, JOINT_COLORS)):
+    short = col.replace('Single_leg_', '')
+    axes[i].axhline(unperturbed_mean[f'tau_{col}'],
+                    color='gray', lw=1.5, ls='--', label='Unperturbed (mean)')
+    arr = np.array([s[:median_len] for s in perturbed_segs[col]
+                    if len(s) >= median_len])
+    if len(arr) == 0:
+        continue
+    mean = np.nanmean(arr, axis=0)
+    std  = np.nanstd(arr,  axis=0)
+    t_ax = np.arange(median_len) / 100.0
+    axes[i].plot(t_ax, mean, color=clr, lw=1.8, label='Perturbed (mean)')
+    axes[i].fill_between(t_ax, mean - std, mean + std, alpha=0.25, color=clr, label='+-1 std')
+    axes[i].axhline(0, color='k', lw=0.5, ls=':')
+    axes[i].set_ylabel(f'{short} [Nm]')
+    axes[i].legend(fontsize=7, loc='upper right')
+
+axes[-1].set_xlabel('Time [s]')
+plt.tight_layout()
+plt.savefig(os.path.join(PLOT_DIR, 'torque_comparison.png'), dpi=120)
+plt.close()
+print("Saved -> torque_comparison.png")
+
+# ── Torque by perturbation direction ──────────────────────────────────────
+pos_trials = [tid for tid in valid_trials
+              if df[df['trial_id'] == tid]['motor_force'].mean() > 0]
+neg_trials = [tid for tid in valid_trials
+              if df[df['trial_id'] == tid]['motor_force'].mean() < 0]
+
+print(f"\nPerturbation direction split:")
+print(f"  Positive (push +Y): {len(pos_trials)} trials")
+print(f"  Negative (push -Y): {len(neg_trials)} trials")
+
+if pos_trials:
+    s = df[df['trial_id'] == pos_trials[0]]
+    print(f"  Sample pos trial {pos_trials[0]}: {len(s)} frames, "
+          f"mean force={s['motor_force'].mean():.2f}N")
+if neg_trials:
+    s = df[df['trial_id'] == neg_trials[0]]
+    print(f"  Sample neg trial {neg_trials[0]}: {len(s)} frames, "
+          f"mean force={s['motor_force'].mean():.2f}N")
+
+def _torque_by_direction(trial_list):
+    segs = {col: [] for col in JOINT_MODEL}
+    for tid in trial_list:
+        seg = df[df['trial_id'] == tid].reset_index(drop=True)
+        if len(seg) == 0:
+            continue
+        for col in JOINT_MODEL:
+            vals = seg[f'tau_{col}'].values
+            if len(vals) > 0:
+                segs[col].append(vals)
+    for col in JOINT_MODEL:
+        if len(segs[col]) == 0:
+            print(f"  WARNING: no segments for {col} - skipping")
+            segs[col] = None
+            continue
+        min_len   = min(len(s) for s in segs[col])
+        segs[col] = np.array([s[:min_len] for s in segs[col]])
+    return segs
+
+pos_segs = _torque_by_direction(pos_trials)
+neg_segs = _torque_by_direction(neg_trials)
+
+fig, axes = plt.subplots(4, 1, figsize=(11, 12), sharex=True)
+fig.suptitle('Joint Torques by Perturbation Direction (+ vs -)', fontsize=13)
+
+for i, (col, clr) in enumerate(zip(JOINT_MODEL, JOINT_COLORS)):
+    short = col.replace('Single_leg_', '')
+    axes[i].axhline(unperturbed_mean[f'tau_{col}'],
+                    color='gray', lw=1.5, ls='--', label='Unperturbed (mean)')
+    if pos_segs[col] is not None:
+        mean_p = np.nanmean(pos_segs[col], axis=0)
+        std_p  = np.nanstd(pos_segs[col],  axis=0)
+        t_p    = np.arange(len(mean_p)) / 100.0
+        axes[i].plot(t_p, mean_p, color='steelblue', lw=1.8, label='Push + (mean)')
+        axes[i].fill_between(t_p, mean_p - std_p, mean_p + std_p,
+                             alpha=0.2, color='steelblue')
+    if neg_segs[col] is not None:
+        mean_n = np.nanmean(neg_segs[col], axis=0)
+        std_n  = np.nanstd(neg_segs[col],  axis=0)
+        t_n    = np.arange(len(mean_n)) / 100.0
+        axes[i].plot(t_n, mean_n, color='crimson', lw=1.8, label='Push - (mean)')
+        axes[i].fill_between(t_n, mean_n - std_n, mean_n + std_n,
+                             alpha=0.2, color='crimson')
+    axes[i].axhline(0, color='k', lw=0.5, ls=':')
+    axes[i].set_ylabel(f'{short} [Nm]')
+    axes[i].legend(fontsize=7, loc='upper right')
+
+axes[-1].set_xlabel('Time [s]')
+plt.tight_layout()
+plt.savefig(os.path.join(PLOT_DIR, 'torque_by_direction.png'), dpi=120)
+plt.close()
+print("Saved -> torque_by_direction.png")
+
+
+# =====================================================
+# 4. Block-average plots (mean +/- std per block)
+# =====================================================
+BLOCK_MAP = {
+    0:    ('Baseline',    'steelblue'),
+    1000: ('Early Adapt', 'darkorange'),
+    4000: ('Late Adapt',  'crimson'),
+    5000: ('Washout',     'seagreen'),
+}
+
+def _block_avg_plot(df_src, y_col, ylabel, filename, valid_trial_ids):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for block_id, (label, color) in BLOCK_MAP.items():
+        block     = df_src[df_src['block_id'] == block_id]
+        trial_ids = block[block['is_perturbed'] == 1]['trial_id'].unique()
+        trial_ids = [tid for tid in trial_ids if tid in valid_trial_ids]
+        segments  = [
+            block[block['trial_id'] == tid][y_col].values
+            for tid in trial_ids
+            if len(block[block['trial_id'] == tid]) > 0
+        ]
+        if not segments:
+            continue
+
+        lengths = [len(s) for s in segments]
+        max_len = min(lengths)
+        print(f"  [{label}] {ylabel} | trials: {len(lengths)}, "
+              f"range: {min(lengths)}-{max(lengths)} frames "
+              f"({min(lengths)/100:.2f}s-{max(lengths)/100:.2f}s), "
+              f"plot cut at {max_len/100:.2f}s")
+
+        padded = np.array([s[:max_len] for s in segments])
+        mean   = np.nanmean(padded, axis=0)
+        std    = np.nanstd(padded,  axis=0)
+        x      = np.arange(max_len) / 100.0
+        ax.plot(x, mean, label=label, color=color)
+        ax.fill_between(x, mean - std, mean + std, alpha=0.2, color=color)
+
+    ax.set_xlabel('Time within trial [s]')
+    ax.set_ylabel(ylabel)
+    ax.set_title(f'Block average +/- std: {ylabel}')
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(PLOT_DIR, filename), dpi=120)
+    plt.close(fig)
+    print(f"Saved -> {filename}")
+
+_block_avg_plot(df, 'com_y', 'CoM Y [m]', 'block_avg_com_y.png', valid_trials)
+_block_avg_plot(df, 'com_x', 'CoM X [m]', 'block_avg_com_x.png', valid_trials)
+for col in JOINT_MODEL:
+    short = col.replace('Single_leg_', '')
+    _block_avg_plot(df, col, f'{short} [rad]', f'block_avg_{short}.png', valid_trials)
+
+block0 = df[df['block_id'] == 0]
+print(block0['motor_force'].abs().max())   # should be < 1 N
+print(block0['is_perturbed'].sum())        # should be 0
+print("=== All block-average plots saved ===")
+
+# MeshCat skipped - lagging issue pending fix
+print("MeshCat skipped. Script finished.")

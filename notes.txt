@@ -1,0 +1,23 @@
+cd C:\Gepi10\SPACEMED\Sem4_Thesis\Thesis\Workspace\examplePinocchio\examplePinocchio\DOCLoop\PinocchioImplementation
+
+conda activate Pinocchio_env
+
+Option 1: Close the Terminal Tab
+Just click the trash icon on the terminal tab to force-kill it. Quickest option.
+
+Option 2: Ctrl + Z then kill
+bash
+Ctrl + Z        # suspends the process, gives you prompt back
+kill %1         # kills the suspended job
+Option 3: Kill by PID (open a new terminal tab)
+In a new terminal tab (+ button):
+
+bash
+# Find the Python process
+tasklist | findstr python
+
+# Kill it by PID (replace 12345 with actual PID)
+taskkill /PID 12345 /F
+Option 4: Kill all Python processes at once
+bash
+taskkill /IM python.exe /F
