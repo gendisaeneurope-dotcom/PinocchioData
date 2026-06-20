@@ -289,17 +289,17 @@ df_filtered['motor_force'] = df['motor_force'].values
 df_filtered.to_csv('Data_1/Subject3_processed.csv', index=False)
 print("Saved → Data_1/Subject3_processed.csv")
 
-# ── Save IRL feature matrix ───────────────────────────────────────────────
+# ── feature matrix ───────────────────────────────────────────────
 df_out = pd.DataFrame({
     'time':         df_filtered['time'].values,
-    'block_id':    df_filtered['block_id'].values,
+    'block_id':     df_filtered['block_id'].values,
     'com_x':        com_x,
     'com_y':        com_y,
     'com_z':        com_z,
     'com_error_x':  com_error_x,
     'com_error_y':  com_error_y,
     'com_error_z':  com_error_z,
-    'motor_force':    df_filtered['motor_force'].values
+    'motor_force':  df_filtered['motor_force'].values
 })
 
 for col in joint_model:
@@ -350,11 +350,5 @@ for col in joint_model:
 df_out.to_csv('Data_1/Subject3_features.csv', index=False)
 print("Jᵀ torques added → Subject3_features.csv")
 
-# Run for one perturbed frame to see raw values
-idx = 35100
-q_exp = df_filtered.loc[idx, joint_model].to_numpy(dtype=np.float64)
-pin.forwardKinematics(model, data, q_exp)
-com_pos = pin.centerOfMass(model, data, q_exp)
-print("CoM position (m?):", com_pos)
-print(df['block_id'].value_counts().sort_index())
+
 
