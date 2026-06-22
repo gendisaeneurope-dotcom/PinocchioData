@@ -53,10 +53,10 @@ print(f"Total model mass: {total_mass:.2f} kg")
 
 omega_n_Y = 2 * np.pi * 0.5        # 0.5 Hz — lateral balance response
 
-KP_Y = total_mass * omega_n_Y**2 * 3   # ×3 accounts for Jacobian dilution across 4 joints
-KD_Y = 2 * total_mass * omega_n_Y * 3
-KP_X = 0.0   # X PD disabled — controlled via hard clamp in integration step
-KD_X = 0.0
+KP_Y = 800.0 # reduced from formula derived. formula overcounts Jacobian amplification
+KD_Y = 200.0 # reduced from critical damping to allow some oscillation — more human-like, and better test of controller response to impulse
+KP_X = 60.0   # X PD disabled — controlled via hard clamp in integration step
+KD_X = 10.0
 
 print(f"Derived gains — KP_Y={KP_Y:.2f}  KD_Y={KD_Y:.2f}")
 print(f"                KP_X=disabled (hard clamp)")
@@ -68,15 +68,18 @@ DQ_MAX  = 3.0     # rad/s — max joint velocity
 COM_ERROR_TOLERANCE = 1e-4   # early-stop: both X and Y errors below 1 mm
 
 # Sinusoidal CoM goal — lateral Y oscillation, hold X at 0
+com_rest_X = 0.00126 # model's natural CoM is slightly forward of hip joint, so add small offset to prevent constant forward error and large PD response
+com_rest_Y = 0.02893 
 SIN_AMP    = 0.05   # amplitude (m) — 5 cm lateral sway
 SIN_FREQ   = 0.5    # frequency (Hz)
-com_goal_x = 0.0    # hold X at neutral throughout
+com_goal_x = com_rest_X   # hold X at neutral throughout
 
 
 
 # External lateral force — ONE timestep impulse at midpoint
 # Applied AFTER controller so controller can compensate next step
-F_EXTERNAL  = np.array([0.0, -27.4, 0.0])  # matches real experiment (-Y, -27.4N)
+F_EXTERNAL  = np.array([0.0, -50.0, 0.0])  # 50N in Y (lateral) — scaled for 67 kg model to create noticeable but recoverable disturbance
+IMPULSE_DURATION = 0.05                    # 50 ms impulse duration → convert to equivalent force magnitude 
 FORCE_STEP  = N // 2                       # midpoint of sinusoid
 
 
@@ -86,9 +89,20 @@ FORCE_STEP  = N // 2                       # midpoint of sinusoid
 q  = pin.neutral(model).copy()
 dq = np.zeros(model.nv)
 
+# check initial CoM position
+pin.forwardKinematics(model, data, q)
+com_initial = pin.centerOfMass(model, data, q)
+print(f"Initial CoM: {com_initial}")
+
+pin.computeJointJacobians(model, data, q)
+J_com = pin.jacobianCenterOfMass(model, data, q)
+print(f"J_com shape: {J_com.shape}")
+print(f"J_com norm: {np.linalg.norm(J_com):.4f}")
+print(f"Max Jt@F magnitude: {np.max(np.abs(J_com.T @ np.array([0,1,0]))):.4f}")
+
 # Initialise previous errors for derivative term
-previous_error_x = 0.0
-previous_error_y = 0.0
+previous_error_x = com_rest_X - float(com_initial[0])
+previous_error_y = com_rest_Y - float(com_initial[1])
 
 
 # =====================================================
@@ -114,7 +128,7 @@ for step in range(N):
     t = step * DT
 
     # ── Step A: sinusoidal CoM goal ───────────────────────────
-    com_goal_y = SIN_AMP * np.sin(2 * np.pi * SIN_FREQ * t)
+    com_goal_y = com_rest_Y + SIN_AMP * np.sin(2 * np.pi * SIN_FREQ * t)
 
     # ── Step B: current CoM from forward kinematics ──────────
     pin.forwardKinematics(model, data, q)
@@ -176,11 +190,19 @@ for step in range(N):
 
     # ── Step E: total torque = PD + disturbance ───────────────
     tau_total = tau_pd + tau_fext + tau_gravity  # add gravity compensation back in for full torque
+    tau_total = np.clip(tau_total, -TAU_MAX, TAU_MAX)
+    
+    if step == 0:
+        print(f"Step 0 tau_total: {tau_total}")
 
     # ── Step F: forward dynamics M⁻¹(tau - h) ────────────────
     M_mat = pin.crba(model, data, q)
     h     = pin.rnea(model, data, q, dq, np.zeros(model.nv))
-    ddq   = np.linalg.solve(M_mat, tau_total - h)
+
+    # impulse force also directly perturbs acceleration
+    ddq = np.linalg.solve(M_mat, tau_total - h)
+    if USE_FORCE:
+        ddq += np.linalg.solve(M_mat, J_com.T @ F_EXTERNAL)
 
     # ── Step G: Euler integration ─────────────────────────────
     dq += ddq * DT
@@ -207,8 +229,15 @@ for step in range(N):
         break
 
 n_steps = len(history['com_goal_y'])
+time_axis  = np.arange(n_steps) * DT
+force_time = FORCE_STEP * DT
 print(f"\nSimulation finished — {n_steps} steps ({n_steps * DT:.1f}s)")
 
+# ── Impulse debug ─────────────────────────────────────────────────────────
+print(f"Impulse active frames: {sum(history['force_active'])}")
+print(f"Impulse window: t={FORCE_STEP*DT:.2f}s to {(FORCE_STEP + int(IMPULSE_DURATION/DT))*DT:.2f}s")
+impulse_steps = [i for i, v in enumerate(history['force_active']) if v == 1]
+print(f"Impulse step indices: {impulse_steps}")
 
 # =====================================================
 # 5. Plots
@@ -223,6 +252,14 @@ fig.suptitle(
     f'Force={F_EXTERNAL[1]:.1f}N at t={force_time:.1f}s',
     fontsize=11
 )
+
+# shade impulse window — widened for visibility
+impulse_steps = [i for i, v in enumerate(history['force_active']) if v == 1]
+if impulse_steps:
+    t_center = time_axis[impulse_steps[0]]
+    for ax in axes:
+        ax.axvspan(t_center - 0.3, t_center + 0.3,
+                   color='red', alpha=0.4, zorder=0, label='Impulse window')
 
 # Panel 1 — CoM Y tracking
 axes[0].plot(time_axis, history['com_goal_y'],   ls='--', color='blue',   lw=1.5, label='Goal CoM Y (sinusoid)')
