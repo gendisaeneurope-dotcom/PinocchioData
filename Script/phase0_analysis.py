@@ -400,10 +400,19 @@ print(f"Saved {len(valid_trials)} trial plots → {TRIAL_DIR}/")
 
 
 # ── Torque comparison: perturbed vs unperturbed ───────────────────────────
-block0_frames    = df[df['block_id'] == 0].copy().reset_index(drop=True)
-median_len       = int(trial_lengths.median())
-unperturbed_mean = {f'tau_{col}': block0_frames[f'tau_{col}'].mean() for col in JOINT_MODEL}
+block0_frames = df[df['block_id'] == 0].copy().reset_index(drop=True)
+median_len    = int(trial_lengths.median())
+n_unperturbed_windows = len(block0_frames) // median_len
+n_perturbed_trials    = len(valid_trials)
 
+# Unperturbed: slice Block 0 into fixed-length windows (same length as perturbed)
+unperturbed_segs = {col: [] for col in JOINT_MODEL}
+for i in range(0, len(block0_frames) - median_len, median_len):
+    seg = block0_frames.iloc[i:i + median_len]
+    for col in JOINT_MODEL:
+        unperturbed_segs[col].append(seg[f'tau_{col}'].values)
+
+# Perturbed: all valid trials from all perturbed blocks
 perturbed_segs = {col: [] for col in JOINT_MODEL}
 for tid in valid_trials:
     seg = df[df['trial_id'] == tid].reset_index(drop=True)
@@ -413,26 +422,44 @@ for tid in valid_trials:
                         constant_values=np.nan)[:median_len]
         perturbed_segs[col].append(padded)
 
-t_perturbed = np.arange(median_len) / 100.0
+t_common = np.arange(median_len) / 100.0
 
-fig, axes = plt.subplots(4, 1, figsize=(11, 12), sharex=True)
-fig.suptitle('Joint Torques — Perturbed vs Unperturbed', fontsize=13)
+fig, axes = plt.subplots(4, 1, figsize=(11, 13), sharex=True)
+fig.suptitle(
+    f'Joint Torques — Perturbed vs Unperturbed\n'
+    f'Unperturbed: Block 0 ({n_unperturbed_windows} windows) | '
+    f'Perturbed: all valid trials from Blocks 1–N (n={n_perturbed_trials})',
+    fontsize=11
+)
 
 for i, (col, clr) in enumerate(zip(JOINT_MODEL, JOINT_COLORS)):
     short = col.replace('Single_leg_', '')
-    arr   = np.array(perturbed_segs[col])
-    mean  = np.nanmean(arr, axis=0)
-    std   = np.nanstd(arr,  axis=0)
 
-    axes[i].axhline(unperturbed_mean[f'tau_{col}'],
-                    color='gray', lw=1.5, ls='--', label='Unperturbed (mean)')
-    axes[i].plot(t_perturbed, mean, color=clr, lw=1.8, label='Perturbed (mean)')
-    axes[i].fill_between(t_perturbed, mean - std, mean + std, alpha=0.25, color=clr, label='±1 std')
+    # Unperturbed mean ± std (time-varying, not flat line)
+    unperturbed_array  = np.array(unperturbed_segs[col])
+    unperturbed_mean = np.nanmean(unperturbed_array, axis=0)
+    unperturbed_std  = np.nanstd(unperturbed_array,  axis=0)
+
+    # Perturbed mean ± std
+    perturbed_array  = np.array(perturbed_segs[col])
+    perturbed_mean = np.nanmean(perturbed_array, axis=0)
+    perturbed_std  = np.nanstd(perturbed_array,  axis=0)
+
+    axes[i].plot(t_common, unperturbed_mean, color='gray', lw=1.8, ls='--',
+                 label=f'Unperturbed mean (n={n_unperturbed_windows})')
+    axes[i].fill_between(t_common, unperturbed_mean - unperturbed_std, unperturbed_mean + unperturbed_std,
+                         alpha=0.20, color='gray', label='Unperturbed ±1 std')
+
+    axes[i].plot(t_common, perturbed_mean, color=clr, lw=1.8,
+                 label=f'Perturbed mean (n={n_perturbed_trials})')
+    axes[i].fill_between(t_common, perturbed_mean - perturbed_std, perturbed_mean + perturbed_std,
+                         alpha=0.25, color=clr, label='Perturbed ±1 std')
+
     axes[i].axhline(0, color='k', lw=0.6, ls=':')
     axes[i].set_ylabel(f'{short} [Nm]')
     axes[i].legend(fontsize=7, loc='upper right')
 
-axes[-1].set_xlabel('Time [s]')
+axes[-1].set_xlabel('Time within trial [s]')
 plt.tight_layout()
 plt.savefig(os.path.join(PLOT_DIR, 'torque_comparison.png'), dpi=120)
 plt.close()
