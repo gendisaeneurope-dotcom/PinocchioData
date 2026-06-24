@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import json
 import pinocchio as pin
 from scipy.signal import butter, filtfilt
 from pathlib import Path
@@ -408,69 +409,115 @@ plt.savefig(os.path.join(PLOT_DIR, 'torque_comparison.png'), dpi=120)
 plt.close()
 print("Saved → torque_comparison.png")
 
+import json
+CONFIG_PATH = 'Data_1/experiment_config_00_subject3.json'
+with open(CONFIG_PATH) as f:
+    cfg = json.load(f)
+
+# Block IDs are 0, 1000, 2000, 3000, 4000, 5000
+block1_trials = sorted(df[df['block_id'] == 1000]['trial_id'].unique())
+block4_trials = sorted(df[df['block_id'] == 4000]['trial_id'].unique())
+
+# Early = positions 4-14 of block 1000 (skip catch trials 0-3)
+early_trial_ids = [block1_trials[i] for i in range(4, 15) if i < len(block1_trials)]
+
+print(df[df['trial_id'].isin(early_trial_ids)]['block_id'].unique())
+
+# Late = positions 40-50 of block 4000
+late_trial_ids = [block4_trials[i] for i in range(40, min(51, len(block4_trials)))]
+print(df[df['trial_id'].isin(late_trial_ids)]['block_id'].unique())
+
+print(f"Block 1000 total: {len(block1_trials)}")
+print(f"Block 4000 total: {len(block4_trials)}")
+print(f"Early trials: {early_trial_ids}")
+print(f"Late trials:  {late_trial_ids}")
+
+trial_sides = {}
+for tid in list(early_trial_ids) + list(late_trial_ids):
+    seg = df[df['trial_id'] == tid]['com_y'].values
+    if len(seg) == 0:
+        continue
+    peak = np.nanmean(seg[len(seg)//2:])
+    trial_sides[tid] = 'right' if peak > 0 else 'left'
+
+left_trials  = [tid for tid in list(early_trial_ids) + list(late_trial_ids) if trial_sides.get(tid) == 'left']
+right_trials = [tid for tid in list(early_trial_ids) + list(late_trial_ids) if trial_sides.get(tid) == 'right']
+
+print(f"Left trials:  {len(left_trials)}")
+print(f"Right trials: {len(right_trials)}")
+
+# ── Quick trial onset check ─────────────────────────────
+for tid in early_trial_ids[:3]:
+    seg = df[df['trial_id'] == tid]
+    print(f"Trial {tid}: {len(seg)} frames, force range: {seg['motor_force'].min():.1f} to {seg['motor_force'].max():.1f}")
 
 # =====================================================
 # 4. Block-average plots (mean ± std per block, baseline-corrected)
 # =====================================================
+# ── Block map now uses early/late trial IDs directly ──────
 BLOCK_MAP = {
-    'Baseline':    ([0],          'steelblue'),
-    'Early Adapt': ([1000, 2000], 'darkorange'),
-    'Late Adapt':  ([3000, 4000], 'crimson'),
-    'Washout':     ([5000],       'seagreen'),
+    'Baseline':    ([0],    'steelblue'),
+    'Early Adapt': ('early', 'darkorange'),
+    'Late Adapt':  ('late',  'crimson'),
+    'Washout':     ([5000], 'seagreen'),
 }
 
-block_trial_counts = {}
-for label, (block_ids, _) in BLOCK_MAP.items():
-    if 0 in block_ids or 5000 in block_ids:
-        b = df[df['block_id'].isin(block_ids)]
-        block_trial_counts[label] = len(b) // int(trial_lengths.median())
-    else:
-        tids = df[(df['block_id'].isin(block_ids)) &
-                  (df['is_perturbed'] == 1)]['trial_id'].unique()
-        block_trial_counts[label] = len([t for t in tids if t in valid_trials])
-print("Block trial counts:", block_trial_counts)
+# ── Baseline correction: block 0 mean per signal ──────────
+block0_means = df[df['block_id'] == 0].mean(numeric_only=True)
 
-
-PRE_TRIAL_FRAMES = 20
-
-def block_avg_plot(df_src, y_col, ylabel, filename, valid_trial_ids, trim_len):
+# ── Plot function ──────────────────────────────────────────
+def block_avg_plot(df_src, y_col, ylabel, filename, valid_trial_ids, trim_len,
+                   left_trials=None):
     fig, ax = plt.subplots(figsize=(10, 4))
     title_parts = []
+    b0_mean = block0_means[y_col]
 
     for label, (block_ids, color) in BLOCK_MAP.items():
-        if 5000 in block_ids:
-            continue
 
-        block = df_src[df_src['block_id'].isin(block_ids)]
-
-        if 0 in block_ids:
-            ref_mean = np.nanmean(block[y_col].values)
-            ref_std  = np.nanstd(block[y_col].values)
+        # Baseline reference band
+        if block_ids == [0]:
+            block0 = df_src[df_src['block_id'] == 0][y_col].values
+            ref_mean = np.nanmean(block0) - b0_mean
+            ref_std  = np.nanstd(block0)
             ax.axhline(ref_mean, color=color, lw=1.5, ls='--', label=f'{label} (ref)')
             ax.axhspan(ref_mean - ref_std, ref_mean + ref_std, alpha=0.08, color=color)
             title_parts.append(f'{label} (ref)')
             continue
 
-        trial_ids = block[block['is_perturbed'] == 1]['trial_id'].unique()
-        trial_ids = [tid for tid in trial_ids if tid in valid_trial_ids]
-        segments  = []
+        # Washout — skip plotting
+        if block_ids == [5000]:
+            continue
 
+        # Early or Late trial IDs
+        trial_ids = early_trial_ids if block_ids == 'early' else late_trial_ids
+
+        segments = []
         for tid in trial_ids:
-            trial_start_idx = df_src[df_src['trial_id'] == tid].index[0]
-            pre_frames = df_src.loc[
-                max(0, trial_start_idx - PRE_TRIAL_FRAMES):trial_start_idx - 1,
-                y_col
-            ].values
-            pre_mean = np.nanmean(pre_frames) if len(pre_frames) > 0 else 0.0
             seg_data = df_src[df_src['trial_id'] == tid][y_col].values
-            seg_data = seg_data - pre_mean
+            if len(seg_data) < 20:
+                continue
+
+            # Per-trial baseline: mean of 10 frames just before this trial
+            tid_start = df_src[df_src['trial_id'] == tid].index[0]
+            pre_frames = df_src.loc[max(0, tid_start - 10): tid_start - 1, y_col].values
+            trial_baseline = np.nanmean(pre_frames) if len(pre_frames) > 0 else b0_mean
+            seg_data = seg_data - trial_baseline
+
+            if left_trials is not None and tid in left_trials:
+                seg_data = -seg_data
+
             segments.append(seg_data)
 
+        print(f"\n[DEBUG] {label} | y_col={y_col} | trial_ids={list(trial_ids)[:5]}...")
+        print(f"  left_trials passed in: {left_trials[:5] if left_trials else None}")
+        print(f"  segments built: {len(segments)}")
+        if segments:
+            print(f"  seg lengths: {[len(s) for s in segments[:5]]}")
+            print(f"  seg[0] sample: {segments[0][:5]}")
+            print(f"  seg[0] mean: {np.nanmean(segments[0]):.5f}")
+
         n = len(segments)
-        title_parts.append(
-            f'{label} (n={n}, tids {int(trial_ids[0]):03d}–{int(trial_ids[-1]):03d})'
-            if trial_ids else f'{label} (n=0)'
-        )
+        title_parts.append(f'{label} (n={n})')
 
         if not segments:
             continue
@@ -482,35 +529,51 @@ def block_avg_plot(df_src, y_col, ylabel, filename, valid_trial_ids, trim_len):
         std    = np.nanstd(padded,  axis=0)
         x      = np.arange(trim_len_actual) / 100.0
 
+        print(f"  trim_len_actual={trim_len_actual}, mean range: {np.nanmin(mean):.5f} to {np.nanmax(mean):.5f}")
         ax.plot(x, mean, label=f'{label} (n={n})', color=color)
         ax.fill_between(x, mean - std, mean + std, alpha=0.2, color=color)
 
-    ax.axhline(0, color='k', lw=0.6, ls=':', label='Pre-trial baseline')
-    ax.set_title(f'Block average ± std — pre-trial corrected: {ylabel}\n'
-                 + ' | '.join(title_parts), fontsize=9)
+    ax.axhline(0, color='k', lw=0.6, ls=':', label='Block 0 mean')
+    ax.set_title(f'Block average ± std — block0 corrected: {ylabel}\n' +
+                 ' | '.join(title_parts), fontsize=9)
     ax.set_xlabel('Time within trial [s]')
-    ax.set_ylabel(f'Δ {ylabel}')
+    ax.set_ylabel((f'Δ {ylabel} (re: pre-trial baseline)')
     ax.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(PLOT_DIR, filename), dpi=120)
     plt.close(fig)
     print(f"Saved → {filename}")
 
+# ── Compute trim_len ───────────────────────────────────────
+all_perturbed = sorted(df[(df['is_perturbed'] == 1) &
+                           (df['block_id'].isin([1000,2000,3000,4000]))]['trial_id'].unique())
+lengths_all = [len(df[df['trial_id'] == tid]) for tid in all_perturbed]
+print(f"Shortest: {min(lengths_all)} frames = {min(lengths_all)/100:.2f}s")
+print(f"Median:   {int(np.median(lengths_all))} frames = {int(np.median(lengths_all))/100:.2f}s")
+TRIM_LEN = int(np.median(lengths_all))
+print(f"TRIM_LEN → {TRIM_LEN} frames = {TRIM_LEN/100:.2f}s")
 
-# Compute trim_len once here, outside the function
-lengths_all = [len(df[df['trial_id'] == tid]) for tid in valid_trials]
-print(f"Shortest trial: {min(lengths_all)} frames = {min(lengths_all)/100:.2f}s")
-print(f"Median trial:   {int(np.median(lengths_all))} frames = {int(np.median(lengths_all))/100:.2f}s")
-print(f"Longest trial:  {max(lengths_all)} frames = {max(lengths_all)/100:.2f}s")
-TRIM_LEN = int(np.percentile(lengths_all, 10))
-print(f"trim_len → {TRIM_LEN} frames = {TRIM_LEN/100:.2f}s")
+short_tids = [tid for tid in all_perturbed
+              if len(df[df['trial_id'] == tid]) < 20]
+print(f"Short trials (<20 frames): {short_tids}")
+for tid in short_tids:
+    print(df[df['trial_id'] == tid][['trial_id', 'block_id', 'is_perturbed', 'motor_force']].to_string())
 
-block_avg_plot(df, 'com_y', 'CoM Y [m]', 'block_avg_com_y.png', valid_trials, TRIM_LEN)
-block_avg_plot(df, 'com_x', 'CoM X [m]', 'block_avg_com_x.png', valid_trials, TRIM_LEN)
+# ── Run plots ──────────────────────────────────────────────
+block_avg_plot(df, 'com_y', 'CoM Y [m]', 'block_avg_com_y.png',
+               valid_trials, TRIM_LEN, left_trials=left_trials)
+
+block_avg_plot(df, 'com_x', 'CoM X [m]', 'block_avg_com_x.png',
+               valid_trials, TRIM_LEN)
+
 for col in JOINT_MODEL:
     short = col.replace('Single_leg_', '')
-    block_avg_plot(df, col,          f'{short} [rad]', f'block_avg_{short}.png',     valid_trials, TRIM_LEN)
-    block_avg_plot(df, f'tau_{col}', f'{short} [Nm]',  f'block_avg_tau_{short}.png', valid_trials, TRIM_LEN)
+    flip = left_trials if 'abd' in short else None
+
+    block_avg_plot(df, col, f'{short} [rad]', f'block_avg_{short}.png',
+                   valid_trials, TRIM_LEN, left_trials=flip)
+    block_avg_plot(df, f'tau_{col}', f'{short} [Nm]', f'block_avg_tau_{short}.png',
+                   valid_trials, TRIM_LEN, left_trials=flip)
 
 print("=== All block-average plots saved ===")
 print("MeshCat skipped. Script finished.")
