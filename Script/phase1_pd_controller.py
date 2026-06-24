@@ -53,8 +53,8 @@ print(f"Total model mass: {total_mass:.2f} kg")
 
 omega_n_Y = 2 * np.pi * 0.5        # 0.5 Hz — lateral balance response
 
-KP_Y = 800.0 # reduced from formula derived. formula overcounts Jacobian amplification
-KD_Y = 200.0 # reduced from critical damping to allow some oscillation — more human-like, and better test of controller response to impulse
+KP_Y = 2000.0 
+KD_Y = 400.0 # reduced from critical damping to allow some oscillation — more human-like, and better test of controller response to impulse
 KP_X = 60.0   # X PD disabled — controlled via hard clamp in integration step
 KD_X = 10.0
 
@@ -65,7 +65,7 @@ print(f"                KP_X=disabled (hard clamp)")
 TAU_MAX = 200.0   # Nm — scaled for 67 kg model
 DQ_MAX  = 3.0     # rad/s — max joint velocity
 
-COM_ERROR_TOLERANCE = 1e-4   # early-stop: both X and Y errors below 1 mm
+COM_ERROR_TOLERANCE = 1e-6   # early-stop: both X and Y errors below 1 mm
 
 # Sinusoidal CoM goal — lateral Y oscillation, hold X at 0
 com_rest_X = 0.00126 # model's natural CoM is slightly forward of hip joint, so add small offset to prevent constant forward error and large PD response
@@ -75,10 +75,9 @@ SIN_FREQ   = 0.5    # frequency (Hz)
 com_goal_x = com_rest_X   # hold X at neutral throughout
 
 
-
 # External lateral force — ONE timestep impulse at midpoint
 # Applied AFTER controller so controller can compensate next step
-F_EXTERNAL  = np.array([0.0, -50.0, 0.0])  # 50N in Y (lateral) — scaled for 67 kg model to create noticeable but recoverable disturbance
+F_EXTERNAL  = np.array([0.0, -20.0, 0.0])  # 50N in Y (lateral) — scaled for 67 kg model to create noticeable but recoverable disturbance
 IMPULSE_DURATION = 0.05                    # 50 ms impulse duration → convert to equivalent force magnitude 
 FORCE_STEP  = N // 2                       # midpoint of sinusoid
 
@@ -167,9 +166,8 @@ for step in range(N):
     # ── Step D: external force AFTER controller ───────────────
     # Controller already computed its response to current state.
     # Force is applied as an additional torque disturbance.
-    # On next step the controller will see the displaced CoM
-    # and generate compensating torques — this is the key fix.
-    USE_FORCE  = (step == FORCE_STEP)   # one-timestep impulse
+    # On next step the controller will see the displaced CoM and generate compensating torques
+    USE_FORCE  = (step >= FORCE_STEP)   # one-timestep impulse
     tau_fext   = np.zeros(model.nv)
 
     if USE_FORCE:
