@@ -236,6 +236,15 @@ block0 = df[df['block_id'] == 0]
 print(f"\nBlock 0 max |motor_force|: {block0['motor_force'].abs().max():.4f} N")
 print(f"Block 0 perturbed frames:   {block0['is_perturbed'].sum()}")
 
+b0 = df[df['block_id'] == 0]['com_y'].values
+print(f"Block 0 com_y mean: {np.nanmean(b0):.5f}")
+print(f"Block 0 com_y std:  {np.nanstd(b0):.5f}")
+print(f"Block 0 com_y min:  {np.nanmin(b0):.5f}")
+print(f"Block 0 com_y max:  {np.nanmax(b0):.5f}")
+
+print(f"Block 0 raw mean for com_y: {df[df['block_id'] == 0]['com_y'].mean():.5f}")
+print(f"Block 0 raw mean for com_x: {df[df['block_id'] == 0]['com_x'].mean():.5f}")
+
 # ── Block-level force diagnostic ──────────────────────────────────────────
 print("\n=== Block Force Summary ===")
 for block_id in sorted(df['block_id'].unique()):
@@ -477,14 +486,25 @@ def block_avg_plot(df_src, y_col, ylabel, filename, valid_trial_ids, trim_len,
         # Baseline reference band
         if block_ids == [0]:
             block0 = df_src[df_src['block_id'] == 0][y_col].values
-            ref_mean = np.nanmean(block0) - b0_mean
-            ref_std  = np.nanstd(block0)
-            ax.axhline(ref_mean, color=color, lw=1.5, ls='--', label=f'{label} (ref)')
-            ax.axhspan(ref_mean - ref_std, ref_mean + ref_std, alpha=0.08, color=color)
-            title_parts.append(f'{label} (ref)')
+            b0_global_mean = np.nanmean(block0)
+            ref_std = np.nanstd(block0)   
+            windows = []
+            for i in range(0, len(block0) - trim_len, trim_len):
+                w = block0[i:i + trim_len] - b0_global_mean
+                windows.append(w)
+            print(f"Block0 windows: {len(windows)}, trim_len={trim_len}, block0 len={len(block0)}")
+            if windows:
+                arr  = np.array(windows)
+                mean = np.nanmean(arr, axis=0)
+                std  = np.nanstd(arr,  axis=0)
+                x    = np.arange(trim_len) / 100.0
+                ax.plot(x, mean, color=color, lw=1.5, ls='--',
+                label=f'{label} (n={len(windows)}, sway ±{ref_std*100:.1f}cm)')
+                ax.fill_between(x, mean - std, mean + std, alpha=0.15, color=color)
+                title_parts.append(f'Baseline (n={len(windows)})')
             continue
 
-        # Washout — skip plotting
+        # Washout — skip plottin
         if block_ids == [5000]:
             continue
 
@@ -537,7 +557,7 @@ def block_avg_plot(df_src, y_col, ylabel, filename, valid_trial_ids, trim_len,
     ax.set_title(f'Block average ± std — block0 corrected: {ylabel}\n' +
                  ' | '.join(title_parts), fontsize=9)
     ax.set_xlabel('Time within trial [s]')
-    ax.set_ylabel((f'Δ {ylabel} (re: pre-trial baseline)')
+    ax.set_ylabel((f'Δ {ylabel} (re: pre-trial baseline)'))
     ax.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(PLOT_DIR, filename), dpi=120)
@@ -560,6 +580,7 @@ for tid in short_tids:
     print(df[df['trial_id'] == tid][['trial_id', 'block_id', 'is_perturbed', 'motor_force']].to_string())
 
 # ── Run plots ──────────────────────────────────────────────
+print(f"TRIM_LEN = {TRIM_LEN}")
 block_avg_plot(df, 'com_y', 'CoM Y [m]', 'block_avg_com_y.png',
                valid_trials, TRIM_LEN, left_trials=left_trials)
 
